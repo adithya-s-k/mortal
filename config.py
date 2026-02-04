@@ -48,6 +48,12 @@ class TrainingConfig:
 
     # Weight sync
     sync_weights_every: int = 1  # Sync weights to rollout workers every N steps
+    # Sync method:
+    #   "reload" (recommended) - uses vLLM v1 sleep/wake_up/reload_weights for efficient updates
+    #   "volume" - saves to shared volume, workers reload from volume (recreates model)
+    #   "direct" - in-memory transfer (vLLM 0.15.0 doesn't support custom weights)
+    #   "checkpoint" - full checkpoint save + model recreation (slowest)
+    weight_sync_method: str = "reload"
 
 
 @dataclass
@@ -94,6 +100,7 @@ class OrchestratorConfig:
             "report_to": self.training.report_to,
             "logging_steps": self.training.logging_steps,
             "sync_weights_every": self.training.sync_weights_every,
+            "weight_sync_method": self.training.weight_sync_method,
             "num_rollout_workers": self.num_rollout_workers,
             "dataset_name": self.dataset_name,
             "dataset_config": self.dataset_config,
@@ -128,6 +135,7 @@ class OrchestratorConfig:
             report_to=d.get("report_to", "wandb"),
             logging_steps=d.get("logging_steps", 10),
             sync_weights_every=d.get("sync_weights_every", 1),
+            weight_sync_method=d.get("weight_sync_method", "reload"),
         )
         return cls(
             model=model,

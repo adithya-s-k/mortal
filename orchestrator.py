@@ -125,21 +125,57 @@ def train(config_dict: Optional[dict] = None):
     # Create rollout workers
     rollout_workers = [RolloutWorker() for _ in range(config.num_rollout_workers)]
 
-    # Pre-warm rollout workers by loading the model
-    print("Pre-warming rollout workers...")
-    warmup_futures = []
-    for worker in rollout_workers:
-        future = worker.generate.spawn(
-            prompts=["Hello"],
-            model_path=config.model.model_name,
-            max_tokens=10,
-            max_model_len=config.model.max_model_len,
-        )
-        warmup_futures.append(future)
+    # Pre-warm rollout workers with appropriate initialization
+    sync_method = config.training.weight_sync_method
+    print(f"Pre-warming rollout workers (sync_method: {sync_method})...")
 
-    # Wait for warmup
-    for future in warmup_futures:
-        future.get()
+    # Track model path for reload-based sync
+    rollout_model_path = None
+
+    if sync_method == "reload":
+        # Initialize with local model path for efficient reload_weights
+        print("  Using efficient reload-based initialization...")
+        warmup_futures = []
+        for worker in rollout_workers:
+            future = worker.initialize_for_weight_sync.spawn(
+                base_model=config.model.model_name,
+                max_model_len=config.model.max_model_len,
+            )
+            warmup_futures.append(future)
+
+        # Wait for initialization and get the model path
+        for future in warmup_futures:
+            rollout_model_path = future.get()  # All workers return same path
+        print(f"  Rollout workers initialized at {rollout_model_path}")
+
+        # Do a quick warmup generation
+        warmup_gen_futures = []
+        for worker in rollout_workers:
+            future = worker.generate.spawn(
+                prompts=["Hello"],
+                model_path=rollout_model_path,
+                max_tokens=10,
+                max_model_len=config.model.max_model_len,
+            )
+            warmup_gen_futures.append(future)
+        for future in warmup_gen_futures:
+            future.get()
+    else:
+        # Standard warmup with HuggingFace model path
+        warmup_futures = []
+        for worker in rollout_workers:
+            future = worker.generate.spawn(
+                prompts=["Hello"],
+                model_path=config.model.model_name,
+                max_tokens=10,
+                max_model_len=config.model.max_model_len,
+            )
+            warmup_futures.append(future)
+
+        # Wait for warmup
+        for future in warmup_futures:
+            future.get()
+
     print("Rollout workers warmed up")
 
     # Calculate training steps
@@ -153,7 +189,11 @@ def train(config_dict: Optional[dict] = None):
     print(f"Total training steps: {total_steps}")
 
     # Track current model path for rollout workers (updated after checkpoint syncs)
-    current_rollout_model_path = config.model.model_name
+    # For "reload" mode, use the local volume path; otherwise use HuggingFace name
+    if sync_method == "reload" and rollout_model_path is not None:
+        current_rollout_model_path = rollout_model_path
+    else:
+        current_rollout_model_path = config.model.model_name
 
     # Training loop
     global_step = 0
@@ -240,32 +280,123 @@ def train(config_dict: Optional[dict] = None):
             wandb.log(metrics, step=global_step)
 
             # 5. Sync weights to rollout workers (periodically)
-            # Use checkpoint-based sync via shared volume (more efficient than byte transfer)
             if (global_step + 1) % config.training.sync_weights_every == 0:
-                print("Syncing weights to rollout workers via checkpoint...")
+                sync_method = config.training.weight_sync_method
+                print(f"Syncing weights to rollout workers (method: {sync_method})...")
+
                 try:
-                    # Save checkpoint to volume
-                    sync_checkpoint_path = actor.save_checkpoint.remote(
-                        step=global_step + 1,
-                        config=config.to_dict(),
-                    )
-                    print(f"Checkpoint saved to: {sync_checkpoint_path}")
+                    import time
+                    sync_start = time.time()
 
-                    # Reload rollout workers from checkpoint
-                    sync_futures = []
-                    for worker in rollout_workers:
-                        future = worker.reload_from_checkpoint.spawn(sync_checkpoint_path)
-                        sync_futures.append(future)
+                    if sync_method == "direct":
+                        # DIRECT: In-memory weight update via vLLM's load_weights()
+                        # Fastest method - no disk I/O, updates weights in-place
+                        weights_bytes = actor.get_weights.remote(config=config.to_dict())
+                        get_weights_time = time.time() - sync_start
+                        weights_size_mb = len(weights_bytes) / (1024 * 1024)
+                        print(f"  Got weights: {weights_size_mb:.1f} MB in {get_weights_time:.2f}s")
 
-                    # Wait for sync to complete
-                    for future in sync_futures:
-                        future.get()
+                        # Update all rollout workers directly (parallel)
+                        sync_futures = []
+                        for worker in rollout_workers:
+                            future = worker.update_weights_direct.spawn(weights_bytes)
+                            sync_futures.append(future)
 
-                    # Update the model path for future generate calls
-                    current_rollout_model_path = sync_checkpoint_path
-                    print(f"Weights synced via checkpoint, rollout workers now using: {current_rollout_model_path}")
+                        # Wait for all workers to complete
+                        sync_results = [f.get() for f in sync_futures]
+                        success_count = sum(sync_results)
+
+                        sync_time = time.time() - sync_start
+                        print(f"  Weights synced to {success_count}/{len(rollout_workers)} workers in {sync_time:.2f}s")
+
+                    elif sync_method == "volume":
+                        # VOLUME: Save to shared volume, workers load from volume
+                        # Good balance of speed and reliability, avoids large network transfers
+                        manifest = actor.sync_weights_to_volume.remote(
+                            sync_id=global_step + 1,
+                            config=config.to_dict(),
+                        )
+                        print(f"  Weights saved to volume (sync_id: {manifest['sync_id']})")
+
+                        # Reload rollout workers from volume using optimized method
+                        sync_futures = []
+                        for worker in rollout_workers:
+                            future = worker.load_from_weight_sync.spawn(
+                                base_model=config.model.model_name,
+                                sync_dir="/storage/weight_sync",
+                                max_model_len=config.model.max_model_len,
+                            )
+                            sync_futures.append(future)
+
+                        sync_results = [f.get() for f in sync_futures]
+                        success_count = sum(sync_results)
+
+                        sync_time = time.time() - sync_start
+                        print(f"  Weights synced via volume in {sync_time:.2f}s")
+
+                    elif sync_method == "reload":
+                        # RELOAD: Save weights to model path, use vLLM reload_weights
+                        # Most efficient - uses sleep/wake_up/reload_weights pattern
+                        if rollout_model_path is None:
+                            print("  Warning: rollout_model_path not set, falling back to volume sync")
+                            sync_method = "volume"
+                        else:
+                            # Save weights to the model path rollout workers are using
+                            manifest = actor.sync_weights_to_model_path.remote(
+                                model_path=rollout_model_path,
+                                sync_id=global_step + 1,
+                                config=config.to_dict(),
+                            )
+                            print(f"  Weights saved to {rollout_model_path}")
+
+                            # Reload weights in rollout workers (uses sleep/wake_up pattern)
+                            sync_futures = []
+                            for worker in rollout_workers:
+                                future = worker.update_weights_from_volume.spawn(
+                                    weights_path=rollout_model_path,
+                                )
+                                sync_futures.append(future)
+
+                            sync_results = [f.get() for f in sync_futures]
+                            success_count = sum(sync_results)
+
+                            sync_time = time.time() - sync_start
+                            print(f"  Weights reloaded in {sync_time:.2f}s (efficient reload)")
+
+                    elif sync_method == "checkpoint":
+                        # CHECKPOINT: Full checkpoint save + reload (most reliable, slowest)
+                        sync_checkpoint_path = actor.save_checkpoint.remote(
+                            step=global_step + 1,
+                            config=config.to_dict(),
+                        )
+                        print(f"  Checkpoint saved to: {sync_checkpoint_path}")
+
+                        # Reload rollout workers from checkpoint
+                        sync_futures = []
+                        for worker in rollout_workers:
+                            future = worker.reload_from_checkpoint.spawn(sync_checkpoint_path)
+                            sync_futures.append(future)
+
+                        sync_results = [f.get() for f in sync_futures]
+                        success_count = sum(sync_results)
+
+                        # Update model path for future generate calls
+                        current_rollout_model_path = sync_checkpoint_path
+
+                        sync_time = time.time() - sync_start
+                        print(f"  Weights synced via checkpoint in {sync_time:.2f}s")
+
+                    else:
+                        print(f"  Warning: Unknown sync method '{sync_method}', skipping")
+                        success_count = 0
+
+                    if success_count < len(rollout_workers):
+                        print(f"  Warning: {len(rollout_workers) - success_count} workers failed to sync")
+
                 except Exception as e:
                     print(f"Warning: Weight sync failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     print("Continuing with current rollout weights...")
 
             # 6. Checkpoint periodically

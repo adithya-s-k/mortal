@@ -20,6 +20,7 @@ def main(
     learning_rate: float = 5e-6,
     save_steps: int = 100,
     sync_weights_every: int = 1,
+    weight_sync_method: str = "direct",
     simple_mode: bool = False,
 ):
     """Launch GRPO training on Modal.
@@ -37,6 +38,11 @@ def main(
         learning_rate: Learning rate (default: 5e-6)
         save_steps: Save checkpoint every N steps (default: 100)
         sync_weights_every: Sync weights to rollout workers every N steps (default: 1)
+        weight_sync_method: Method for syncing weights:
+            "reload" (recommended) - uses vLLM v1 sleep/wake_up/reload_weights
+            "volume" - saves to shared volume, workers reload
+            "direct" - in-memory transfer (limited vLLM support)
+            "checkpoint" - full checkpoint save + reload (slowest)
         simple_mode: Use TRL's built-in training loop instead of orchestrator (default: False)
     """
     config = {
@@ -52,6 +58,7 @@ def main(
         "learning_rate": learning_rate,
         "save_steps": save_steps,
         "sync_weights_every": sync_weights_every,
+        "weight_sync_method": weight_sync_method,
     }
 
     print("Starting GRPO training with config:")

@@ -44,13 +44,13 @@ TRAINING_IMAGE = (
 
 # vLLM Image (for Rollout workers - standalone vLLM inference)
 # Using debian_slim which works better with vLLM multiprocessing
+# Note: VLLM_USE_V1=1 (default) enables v1 engine with collective_rpc for direct weight updates
 VLLM_IMAGE = (
     modal.Image.debian_slim(python_version="3.11")
     .run_commands("pip install uv")
     .run_commands("uv pip install vllm transformers safetensors hf_transfer --system")
     .env({
         "HF_HOME": f"{STORAGE_PATH}/hf_cache",
-        "VLLM_USE_V1": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     })
 )
