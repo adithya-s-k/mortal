@@ -1,6 +1,8 @@
-# MRL - Modal Reinforcement Learning
+# MORTAL
 
-A serverless reinforcement learning framework for LLMs on [Modal](https://modal.com). Built on TRL and vLLM, MRL supports any RL algorithm available in TRL (GRPO, PPO, DPO, etc.) with pluggable reward environments, configurable GPU allocation, and a simple programmatic API. Currently ships with GRPO as the default training algorithm.
+(M)odal (O)rchestrated (R)einforcement (T)raining (A)rchitecture for (L)LMs
+
+A serverless reinforcement learning framework for LLMs on [Modal](https://modal.com). Built on [TRL](https://github.com/huggingface/trl) and vLLM, MORTAL supports any RL algorithm available in TRL (GRPO, PPO, DPO, etc.) with pluggable reward environments, configurable GPU allocation, and a simple programmatic API. Currently ships with GRPO as the default training algorithm.
 
 ## Architecture
 
@@ -8,7 +10,7 @@ A serverless reinforcement learning framework for LLMs on [Modal](https://modal.
 User's Machine (CPU)                    Modal Cloud
 +---------------------+      +------------------------------+
 |                     |      |                              |
-|  MRLTrainer         |      |  ActorWorker (GPU)           |
+|  MortalTrainer         |      |  ActorWorker (GPU)           |
 |  +- config          |----->|  +- RL training step         |
 |  +- reward_funcs    |      |  +- weight sync              |
 |  +- train()         |      |  +- checkpoint               |
@@ -47,9 +49,9 @@ modal volume create grpo-trl-storage  # one-time
 #### Sandbox Rewards (code execution)
 
 ```python
-from MRL import MRLTrainer
+from mortal import MortalTrainer
 
-trainer = MRLTrainer(
+trainer = MortalTrainer(
     model="Qwen/Qwen2.5-0.5B-Instruct",
     reward_funcs="sandbox",  # or None
     max_steps=5,
@@ -61,7 +63,7 @@ trainer.train()
 #### Custom Reward Function
 
 ```python
-from MRL import MRLTrainer
+from mortal import MortalTrainer
 from datasets import load_dataset
 
 dataset = load_dataset("my_dataset", split="train")
@@ -72,7 +74,7 @@ def accuracy_reward(completions, ground_truths, **kwargs):
     return [1.0 if c.strip() == gt.strip() else 0.0
             for c, gt in zip(completions, ground_truths)]
 
-trainer = MRLTrainer(
+trainer = MortalTrainer(
     model="Qwen/Qwen2.5-0.5B-Instruct",
     reward_funcs=accuracy_reward,
     train_dataset=dataset,
@@ -91,7 +93,7 @@ def format_reward(completions, **kwargs):
 def length_reward(completions, **kwargs):
     return [min(len(c) / 500, 1.0) for c in completions]
 
-trainer = MRLTrainer(
+trainer = MortalTrainer(
     model="Qwen/Qwen2.5-0.5B-Instruct",
     reward_funcs=[format_reward, length_reward],
     reward_weights=[0.7, 0.3],  # optional, defaults to equal weights
@@ -102,7 +104,7 @@ trainer.train()
 
 ## Reward System
 
-MRL provides a pluggable reward system built around the `RewardEnvironment` base class. You can use plain callables for simple cases, or subclass `RewardEnvironment` for structured reward logic with access to remote execution tools.
+MORTAL provides a pluggable reward system built around the `RewardEnvironment` base class. You can use plain callables for simple cases, or subclass `RewardEnvironment` for structured reward logic with access to remote execution tools.
 
 ### Reward Modes
 
@@ -121,7 +123,7 @@ Subclass `RewardEnvironment` to create custom reward environments with a fixed i
 - **`execute_in_function(code)`** -- Runs code in a pre-warmed Modal Function (TRAINING_IMAGE with torch/trl/numpy). Faster, no container spin-up.
 
 ```python
-from MRL.rewards import RewardEnvironment
+from mortal.rewards import RewardEnvironment
 
 class XMLFormatReward(RewardEnvironment):
     name = "XMLFormat"
@@ -131,7 +133,7 @@ class XMLFormatReward(RewardEnvironment):
         has_answer = "<answer>" in completion and "</answer>" in completion
         return float(has_think) * 0.5 + float(has_answer) * 0.5
 
-trainer = MRLTrainer(
+trainer = MortalTrainer(
     reward_funcs=XMLFormatReward(),
     train_dataset=dataset,
 )
@@ -141,7 +143,7 @@ trainer = MRLTrainer(
 
 ```python
 import modal
-from MRL.rewards import RewardEnvironment, SandboxConfig
+from mortal.rewards import RewardEnvironment, SandboxConfig
 
 class NumpyTestEnvironment(RewardEnvironment):
     name = "NumpyTest"
@@ -161,7 +163,7 @@ class NumpyTestEnvironment(RewardEnvironment):
 #### Using Function Execution (pre-warmed, fast)
 
 ```python
-from MRL.rewards import RewardEnvironment
+from mortal.rewards import RewardEnvironment
 
 class FastCodeCheck(RewardEnvironment):
     name = "FastCodeCheck"
@@ -185,15 +187,15 @@ def score_batch(self, completions, prompts, **kwargs):
 
 ### Example Environments
 
-MRL ships with ready-to-use environments in `MRL.rewards.examples`:
+MORTAL ships with ready-to-use environments in `mortal.rewards.examples`:
 
 #### CodeExecutionEnvironment
 
 Extracts code from completions, runs with test cases in Modal Sandboxes.
 
 ```python
-from MRL.rewards.examples import CodeExecutionEnvironment
-from MRL.rewards import SandboxConfig
+from mortal.rewards.examples import CodeExecutionEnvironment
+from mortal.rewards import SandboxConfig
 import modal
 
 # Default (binary pass/fail)
@@ -208,7 +210,7 @@ env = CodeExecutionEnvironment(
     ),
 )
 
-trainer = MRLTrainer(reward_funcs=env, train_dataset=ds)
+trainer = MortalTrainer(reward_funcs=env, train_dataset=ds)
 ```
 
 #### LLMJudgeEnvironment
@@ -216,7 +218,7 @@ trainer = MRLTrainer(reward_funcs=env, train_dataset=ds)
 Uses an OpenAI-compatible API to score completions with an LLM.
 
 ```python
-from MRL.rewards.examples import LLMJudgeEnvironment
+from mortal.rewards.examples import LLMJudgeEnvironment
 
 judge = LLMJudgeEnvironment(
     model="gpt-4o-mini",
@@ -225,7 +227,7 @@ judge = LLMJudgeEnvironment(
     score_range=(0, 10),
 )
 
-trainer = MRLTrainer(reward_funcs=judge, train_dataset=ds)
+trainer = MortalTrainer(reward_funcs=judge, train_dataset=ds)
 ```
 
 ### Plain Callable (simplest)
@@ -239,7 +241,7 @@ def my_reward(completions, ground_truths, metadata, **kwargs):
 
 ## Configuration
 
-### MRLTrainer Parameters
+### MortalTrainer Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -326,12 +328,12 @@ Supported loss variants: `dapo`, `grpo`, `dr_grpo`, `bnpo`, `cispo`, `sapo`
 ## File Structure
 
 ```
-MRL/
+mortal/
 +-- __init__.py          # Package exports
 +-- app.py               # Modal app, images, volume
 +-- config.py            # OrchestratorConfig, ModelConfig, TrainingConfig, GenerationConfig
 +-- orchestrator.py      # train() [Modal], train_local() [local], training loop
-+-- trainer.py           # MRLTrainer (programmatic API)
++-- trainer.py           # MortalTrainer (programmatic API)
 +-- rewards/
 |   +-- __init__.py      # Core exports (RewardEnvironment, SandboxConfig, etc.)
 |   +-- base.py          # RewardEnvironment, SandboxConfig, FunctionConfig, ExecutionResult
@@ -390,7 +392,7 @@ modal volume rm grpo-trl-storage model_cache/Qwen_Qwen2-0.5B-Instruct
 - Fall back to `volume` or `checkpoint` if reload fails
 
 ### Function Not Hydrated
-- If using `execute_in_function()` from a custom script, import `MRL.rewards.function_executor` before `app.run()` so Modal discovers the function.
+- If using `execute_in_function()` from a custom script, import `mortal.rewards.function_executor` before `app.run()` so Modal discovers the function.
 
 ## References
 
