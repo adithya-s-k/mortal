@@ -1,9 +1,9 @@
-"""Modal app, images, and volume definitions for GRPO training."""
+"""MORTAL - Modal app, images, and volume definitions for GRPO training."""
 
 import modal
 
 # Modal App
-app = modal.App("modal-grpo-trl")
+app = modal.App("mortal")
 
 # Paths
 STORAGE_PATH = "/storage"
@@ -30,7 +30,7 @@ TRAINING_IMAGE = (
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         "HF_HOME": f"{STORAGE_PATH}/hf_cache",
     })
-    .add_local_python_source("MRL")
+    .add_local_python_source("mortal")
 )
 
 # vLLM Image (for Rollout workers - standalone vLLM inference)
@@ -44,7 +44,7 @@ VLLM_IMAGE = (
         "HF_HOME": f"{STORAGE_PATH}/hf_cache",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     })
-    .add_local_python_source("MRL")
+    .add_local_python_source("mortal")
 )
 
 # Image imports for type checking

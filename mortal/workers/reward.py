@@ -1,7 +1,7 @@
 """Reward computation using Modal Sandboxes for code execution.
 
 NOTE: This module is kept for backward compatibility. For new code, prefer
-using the MRL.rewards package (RewardEnvironment, CodeExecutionEnvironment, etc.).
+using the mortal.rewards package (RewardEnvironment, CodeExecutionEnvironment, etc.).
 """
 
 from typing import Iterable, Sequence
@@ -9,7 +9,7 @@ from typing import Iterable, Sequence
 import modal
 
 # Import app from the shared app module
-from MRL.app import app
+from mortal.app import app
 
 STORAGE_PATH = "/storage"
 

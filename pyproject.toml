@@ -1,7 +1,7 @@
 [project]
-name = "MRL"
+name = "mortal"
 version = "0.1.0"
-description = "Modal Reinforcement Learning - serverless RL training for LLMs"
+description = "MORTAL - Modal Orchestrated Reinforcement Training Architecture for LLMs"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

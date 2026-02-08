@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import modal
 
-from MRL.app import app
-from MRL.rewards.base import ExecutionResult, SandboxConfig
+from mortal.app import app
+from mortal.rewards.base import ExecutionResult, SandboxConfig
 
 
 def _run_one_sandbox(code: str, config: SandboxConfig) -> ExecutionResult:

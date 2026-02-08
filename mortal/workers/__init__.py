@@ -1,4 +1,4 @@
-"""Worker modules for Modal GRPO training.
+"""Worker modules for MORTAL training.
 
 Workers:
 - ActorWorker: Training worker using TRL's GRPOTrainer (runs on H100)
@@ -6,9 +6,9 @@ Workers:
 - RewardWorker: Reward computation using Modal Sandboxes for code execution
 """
 
-from MRL.workers.actor import ActorWorker
-from MRL.workers.rollout import RolloutWorker
-from MRL.workers.reward import (
+from mortal.workers.actor import ActorWorker
+from mortal.workers.rollout import RolloutWorker
+from mortal.workers.reward import (
     compute_reward,
     reward_helper_function,
     compute_reward_batch,

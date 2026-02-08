@@ -149,13 +149,13 @@ class RewardEnvironment(ABC):
         Creates a fresh isolated container per call using sandbox_config.image.
         Best for untrusted code.
         """
-        from MRL.rewards.sandbox_executor import execute_in_sandbox_remote
+        from mortal.rewards.sandbox_executor import execute_in_sandbox_remote
 
         return execute_in_sandbox_remote(code, self.sandbox_config)
 
     def execute_batch_in_sandbox(self, codes: list[str]) -> list[ExecutionResult]:
         """Execute multiple code strings in parallel Modal Sandboxes."""
-        from MRL.rewards.sandbox_executor import execute_batch_in_sandbox_remote
+        from mortal.rewards.sandbox_executor import execute_batch_in_sandbox_remote
 
         return execute_batch_in_sandbox_remote(codes, self.sandbox_config)
 
@@ -167,12 +167,12 @@ class RewardEnvironment(ABC):
         Uses pre-warmed containers from function_config.image.
         Supports GPU. Best for trusted computation.
         """
-        from MRL.rewards.function_executor import execute_in_function_remote
+        from mortal.rewards.function_executor import execute_in_function_remote
 
         return execute_in_function_remote(code, self.function_config)
 
     def execute_batch_in_function(self, codes: list[str]) -> list[ExecutionResult]:
         """Execute multiple code strings in parallel Modal Functions."""
-        from MRL.rewards.function_executor import execute_batch_in_function_remote
+        from mortal.rewards.function_executor import execute_batch_in_function_remote
 
         return execute_batch_in_function_remote(codes, self.function_config)

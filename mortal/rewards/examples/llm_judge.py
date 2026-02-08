@@ -4,7 +4,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from MRL.rewards.base import RewardEnvironment, SandboxConfig
+from mortal.rewards.base import RewardEnvironment, SandboxConfig
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are an expert judge evaluating the quality of AI-generated responses. "

@@ -42,31 +42,7 @@ modal setup  # authenticate
 modal volume create grpo-trl-storage  # one-time
 ```
 
-### CLI Usage
-
-```bash
-# Default training (sandbox code-execution rewards)
-modal run MRL/train.py::main --max-steps 5
-
-# With GPU and worker options
-modal run MRL/train.py::main \
-  --model Qwen/Qwen2.5-0.5B-Instruct \
-  --max-steps 10 \
-  --batch-size 4 \
-  --num-rollout-workers 2 \
-  --actor-gpu A100 \
-  --rollout-gpu A10G
-
-# Minimal test run
-modal run MRL/train.py::main \
-  --max-steps 1 --batch-size 2 --max-samples 4 \
-  --num-rollout-workers 1 --num-generations 2
-
-# Background run
-modal run --detach MRL/train.py::main --max-steps 100
-```
-
-### Programmatic API (MRLTrainer)
+### Usage
 
 #### Sandbox Rewards (code execution)
 
@@ -289,14 +265,6 @@ def my_reward(completions, ground_truths, metadata, **kwargs):
 | `max_model_len` | `16384` | Max model context length |
 | `max_completion_length` | `1024` | Max completion length for training |
 
-### CLI Arguments
-
-All MRLTrainer parameters are available as CLI args via `modal run MRL/train.py::main`. Additional CLI-only options:
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--simple-mode` | `False` | Use TRL's built-in GRPOTrainer loop |
-
 ### Weight Sync Methods
 
 | Method | Speed | Description |
@@ -317,37 +285,26 @@ All MRLTrainer parameters are available as CLI args via `modal run MRL/train.py:
 |                                                                     |
 |  1. GET BATCH                                                       |
 |     Orchestrator fetches batch of prompts from dataset              |
-|     Example: 4 coding problems                                      |
 |                          |                                          |
 |                          v                                          |
 |  2. GENERATE COMPLETIONS (Parallel)                                 |
-|     Each prompt is sent to rollout workers                          |
-|     With num_generations=2, we get 8 completions total              |
+|     Fan out across RolloutWorkers (vLLM inference + logprobs)       |
 |     +-------------+ +-------------+                                 |
 |     |RolloutWorker| |RolloutWorker|                                 |
-|     |  4 prompts  | |  4 prompts  |                                 |
-|     |  -> 4 codes | |  -> 4 codes |                                 |
 |     +------+------+ +------+------+                                 |
 |            +-------+-------+                                        |
 |                    v                                                |
 |  3. COMPUTE REWARDS                                                 |
 |     RewardEnvironment.score_batch() or callable                     |
 |     Can use sandbox/function execution for remote code runs         |
-|     +--------+ +--------+ +--------+ +--------+                    |
-|     |Sandbox1| |Sandbox2| |  ...   | |Sandbox8|                    |
-|     | r=1    | | r=0    | |        | | r=1    |                    |
-|     +---+----+ +---+----+ +---+----+ +---+----+                    |
-|         +----------+-----------+----------+                         |
+|                    |                                                |
 |                    v                                                |
 |  4. TRAIN STEP                                                      |
-|     ActorWorker receives (prompts, completions, rewards)            |
-|     Computes RL loss and updates model weights                      |
+|     ActorWorker: RL loss computation + weight update                |
 |                    |                                                |
 |                    v                                                |
 |  5. SYNC WEIGHTS (Every N steps)                                    |
-|     Actor saves weights to shared volume                            |
-|     RolloutWorkers reload via sleep/wake_up/reload_weights (~2s)    |
-|     Now generating with updated policy!                             |
+|     Actor -> RolloutWorkers via reload/volume/checkpoint            |
 |                    |                                                |
 |                    v                                                |
 |  6. REPEAT until max_steps reached                                  |
@@ -357,7 +314,7 @@ All MRLTrainer parameters are available as CLI args via `modal run MRL/train.py:
 
 ### Default Algorithm: GRPO
 
-The default training algorithm is GRPO (Group Relative Policy Optimization), which generates multiple completions per prompt and computes relative advantages within each group:
+GRPO (Group Relative Policy Optimization) generates multiple completions per prompt and computes relative advantages within each group:
 
 1. Generate `num_generations` completions per prompt
 2. Score each with the reward function
@@ -366,18 +323,15 @@ The default training algorithm is GRPO (Group Relative Policy Optimization), whi
 
 Supported loss variants: `dapo`, `grpo`, `dr_grpo`, `bnpo`, `cispo`, `sapo`
 
-Other TRL-supported algorithms (PPO, DPO, etc.) can be integrated by swapping the ActorWorker's training logic.
-
 ## File Structure
 
 ```
 MRL/
-+-- __init__.py          # Package exports (MRLTrainer, configs, reward base classes)
-+-- app.py               # Modal app, images, volume definitions
++-- __init__.py          # Package exports
++-- app.py               # Modal app, images, volume
 +-- config.py            # OrchestratorConfig, ModelConfig, TrainingConfig, GenerationConfig
 +-- orchestrator.py      # train() [Modal], train_local() [local], training loop
-+-- trainer.py           # MRLTrainer facade (programmatic API)
-+-- train.py             # CLI entry point (modal run)
++-- trainer.py           # MRLTrainer (programmatic API)
 +-- rewards/
 |   +-- __init__.py      # Core exports (RewardEnvironment, SandboxConfig, etc.)
 |   +-- base.py          # RewardEnvironment, SandboxConfig, FunctionConfig, ExecutionResult
@@ -386,13 +340,11 @@ MRL/
 |   +-- function_executor.py # Modal Function execution (TRAINING_IMAGE)
 |   +-- utils.py         # Code extraction helpers
 |   +-- examples/
-|       +-- __init__.py
 |       +-- code_execution.py  # CodeExecutionEnvironment
 |       +-- llm_judge.py       # LLMJudgeEnvironment
 +-- workers/
-    +-- actor.py         # ActorWorker - RL training, weight management, checkpointing
+    +-- actor.py         # ActorWorker - RL training, weight management
     +-- rollout.py       # RolloutWorker - vLLM generation, weight sync
-    +-- reward.py        # Legacy sandbox-based code execution (backward compat)
 ```
 
 ## Testing
@@ -408,21 +360,14 @@ python tests/test_trainer.py --train-only
 python tests/test_trainer.py
 ```
 
-### Individual Components
+## Volume Management
 
 ```bash
-# Test rollout worker generation
-modal run MRL/train.py::test_rollout_fn
+# List checkpoints
+modal volume ls grpo-trl-storage checkpoints/
 
-# Test reward computation
-modal run MRL/train.py::test_reward_fn
-
-# List saved checkpoints
-modal run MRL/train.py::list_checkpoints_fn
-
-# Clear corrupted model cache
-modal run MRL/train.py::clear_cache
-modal run MRL/train.py::clear_cache --model Qwen/Qwen2-0.5B-Instruct
+# Clear model cache (if corrupted)
+modal volume rm grpo-trl-storage model_cache/Qwen_Qwen2-0.5B-Instruct
 ```
 
 ## Monitoring
@@ -443,7 +388,6 @@ modal run MRL/train.py::clear_cache --model Qwen/Qwen2-0.5B-Instruct
 ### Weight Sync Issues
 - Default `reload` method requires vLLM v1 (>= 0.8.0)
 - Fall back to `volume` or `checkpoint` if reload fails
-- Use `modal run MRL/train.py::clear_cache` to reset corrupted model cache
 
 ### Function Not Hydrated
 - If using `execute_in_function()` from a custom script, import `MRL.rewards.function_executor` before `app.run()` so Modal discovers the function.

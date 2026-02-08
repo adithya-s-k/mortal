@@ -1,4 +1,4 @@
-"""Test MRLTrainer with sandbox reward and function reward environments.
+"""Test MortalTrainer with sandbox reward and function reward environments.
 
 Tests:
 1-6: Unit tests for reward environments (sandbox, function, mixed)
@@ -21,8 +21,8 @@ import sys
 import modal
 from datasets import Dataset
 
-from MRL.rewards import RewardEnvironment, SandboxConfig
-from MRL.rewards.examples import CodeExecutionEnvironment
+from mortal.rewards import RewardEnvironment, SandboxConfig
+from mortal.rewards.examples import CodeExecutionEnvironment
 
 
 # --- Custom environment that uses Modal Functions (TRAINING_IMAGE) ---
@@ -41,7 +41,7 @@ class FunctionCodeExecutionEnvironment(RewardEnvironment):
         self.weight = weight
 
     def _extract_code(self, completion: str) -> str:
-        from MRL.rewards.utils import extract_code_from_completion
+        from mortal.rewards.utils import extract_code_from_completion
         return extract_code_from_completion(completion)
 
     def _build_test_code(self, code: str, testcases: list[str]) -> str:
@@ -195,7 +195,7 @@ def test_function_reward_with_torch():
 def test_mixed_rewards():
     """Test combining sandbox env + callable with weights via dispatch."""
     print("\n=== Test 5: Mixed Rewards (sandbox env + callable, weighted) ===")
-    from MRL.rewards import compute_rewards
+    from mortal.rewards import compute_rewards
 
     def length_reward(completions, **kwargs):
         return [min(len(c) / 200, 1.0) for c in completions]
@@ -240,12 +240,12 @@ def test_sandbox_vs_function_same_result():
 def test_train_with_sandbox_reward():
     """Full training loop with CodeExecutionEnvironment (sandbox reward)."""
     print("\n=== Test 7: Train with Sandbox Reward (CodeExecutionEnvironment) ===")
-    from MRL.trainer import MRLTrainer
+    from mortal.trainer import MortalTrainer
 
     ds = make_train_dataset()
     env = CodeExecutionEnvironment()
 
-    trainer = MRLTrainer(
+    trainer = MortalTrainer(
         model="Qwen/Qwen2-0.5B-Instruct",
         reward_funcs=env,
         train_dataset=ds,
@@ -263,12 +263,12 @@ def test_train_with_sandbox_reward():
 def test_train_with_function_reward():
     """Full training loop with FunctionCodeExecutionEnvironment (function reward)."""
     print("\n=== Test 8: Train with Function Reward (FunctionCodeExecutionEnvironment) ===")
-    from MRL.trainer import MRLTrainer
+    from mortal.trainer import MortalTrainer
 
     ds = make_train_dataset()
     env = FunctionCodeExecutionEnvironment()
 
-    trainer = MRLTrainer(
+    trainer = MortalTrainer(
         model="Qwen/Qwen2-0.5B-Instruct",
         reward_funcs=env,
         train_dataset=ds,
@@ -307,14 +307,14 @@ def main():
     train_only = "--train-only" in args
 
     if train_only:
-        # Training tests manage their own app.run() via MRLTrainer
+        # Training tests manage their own app.run() via MortalTrainer
         run_train_tests()
         print("\n=== ALL TRAINING TESTS PASSED ===")
         return
 
     # Unit tests need an app.run() context
-    from MRL.app import app
-    import MRL.rewards.function_executor  # noqa: F401  — hydrate before app.run()
+    from mortal.app import app
+    import mortal.rewards.function_executor  # noqa: F401  — hydrate before app.run()
 
     with modal.enable_output():
         with app.run():

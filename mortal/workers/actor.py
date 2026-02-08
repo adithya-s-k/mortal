@@ -7,7 +7,7 @@ import modal
 
 # Import app and resources from the shared app module
 # Note: For Modal, all files need to share the same app instance
-from MRL.app import app, volume, TRAINING_IMAGE
+from mortal.app import app, volume, TRAINING_IMAGE
 
 STORAGE_PATH = "/storage"
 

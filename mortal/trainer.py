@@ -1,11 +1,11 @@
-"""MRLTrainer - TRL-like programmatic API for MRL training."""
+"""MortalTrainer - TRL-like programmatic API for MORTAL training."""
 
-from MRL.config import OrchestratorConfig
-from MRL.rewards.base import RewardEnvironment
+from mortal.config import OrchestratorConfig
+from mortal.rewards.base import RewardEnvironment
 
 
-class MRLTrainer:
-    """High-level trainer facade for MRL.
+class MortalTrainer:
+    """High-level trainer facade for MORTAL.
 
     Provides a TRL-like API for launching GRPO training on Modal.
     Automatically routes to remote (Modal orchestrator) or local orchestrator
@@ -13,14 +13,14 @@ class MRLTrainer:
 
     Examples:
         # Sandbox reward (existing behavior, orchestrator runs on Modal)
-        trainer = MRLTrainer(model="Qwen/Qwen2.5-0.5B-Instruct")
+        trainer = MortalTrainer(model="Qwen/Qwen2.5-0.5B-Instruct")
         trainer.train()
 
         # Custom reward (orchestrator runs locally, GPU work on Modal)
         def length_reward(completions, **kwargs):
             return [min(len(c) / 100, 1.0) for c in completions]
 
-        trainer = MRLTrainer(
+        trainer = MortalTrainer(
             model="Qwen/Qwen2.5-0.5B-Instruct",
             reward_funcs=length_reward,
             train_dataset=dataset,
@@ -29,17 +29,17 @@ class MRLTrainer:
         trainer.train()
 
         # RewardEnvironment (code execution with custom sandbox)
-        from MRL.rewards.examples import CodeExecutionEnvironment
-        from MRL.rewards import SandboxConfig
+        from mortal.rewards.examples import CodeExecutionEnvironment
+        from mortal.rewards import SandboxConfig
         env = CodeExecutionEnvironment(
             partial_credit=True,
             sandbox_cfg=SandboxConfig(image=modal.Image.debian_slim().pip_install("numpy")),
         )
-        trainer = MRLTrainer(reward_funcs=env, train_dataset=ds)
+        trainer = MortalTrainer(reward_funcs=env, train_dataset=ds)
         trainer.train()
 
         # Mixed rewards with weights
-        trainer = MRLTrainer(
+        trainer = MortalTrainer(
             reward_funcs=[env, length_reward],
             reward_weights=[0.7, 0.3],
             train_dataset=ds,
@@ -84,7 +84,7 @@ class MRLTrainer:
         dataset_split="train",
         **kwargs,
     ):
-        """Initialize MRLTrainer.
+        """Initialize MortalTrainer.
 
         Args:
             model: Model name or HuggingFace path.
@@ -181,12 +181,12 @@ class MRLTrainer:
         regular Python script (outside `modal run`).
         """
         import modal
-        from MRL.app import app
+        from mortal.app import app
 
         # Import orchestrator (and transitively all workers) so that
         # app.run() discovers and hydrates all Modal functions/classes.
-        from MRL import orchestrator as _orch  # noqa: F841
-        import MRL.rewards.function_executor  # noqa: F401  — hydrate _run_on_training_image
+        from mortal import orchestrator as _orch  # noqa: F841
+        import mortal.rewards.function_executor  # noqa: F401  — hydrate _run_on_training_image
 
         with modal.enable_output():
             with app.run():

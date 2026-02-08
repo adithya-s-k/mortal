@@ -4,12 +4,12 @@ from typing import Optional
 
 import modal
 
-from MRL.app import app, volume, TRAINING_IMAGE
-from MRL.config import OrchestratorConfig
-from MRL.workers.actor import ActorWorker
-from MRL.workers.rollout import RolloutWorker
-from MRL.rewards import compute_rewards
-from MRL.rewards.base import RewardEnvironment
+from mortal.app import app, volume, TRAINING_IMAGE
+from mortal.config import OrchestratorConfig
+from mortal.workers.actor import ActorWorker
+from mortal.workers.rollout import RolloutWorker
+from mortal.rewards import compute_rewards
+from mortal.rewards.base import RewardEnvironment
 
 STORAGE_PATH = "/storage"
 
@@ -468,7 +468,7 @@ def train_simple(config_dict: Optional[dict] = None):
     from trl import GRPOConfig, GRPOTrainer
     import torch
 
-    from MRL.workers.reward import reward_helper_function
+    from mortal.workers.reward import reward_helper_function
 
     # Parse config
     if config_dict is None:

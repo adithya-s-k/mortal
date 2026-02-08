@@ -5,7 +5,7 @@ from typing import Optional
 import modal
 
 # Import app and resources from the shared app module
-from MRL.app import app, volume, VLLM_IMAGE
+from mortal.app import app, volume, VLLM_IMAGE
 
 STORAGE_PATH = "/storage"
 

@@ -8,8 +8,8 @@ Available:
     LLMJudgeEnvironment      - Use an LLM (OpenAI-compatible API) to score completions
 """
 
-from MRL.rewards.examples.code_execution import CodeExecutionEnvironment
-from MRL.rewards.examples.llm_judge import LLMJudgeEnvironment
+from mortal.rewards.examples.code_execution import CodeExecutionEnvironment
+from mortal.rewards.examples.llm_judge import LLMJudgeEnvironment
 
 __all__ = [
     "CodeExecutionEnvironment",

@@ -2,8 +2,8 @@
 
 from typing import Callable
 
-from MRL.rewards.base import ExecutionResult, RewardEnvironment, SandboxConfig
-from MRL.rewards.utils import extract_code_from_completion
+from mortal.rewards.base import ExecutionResult, RewardEnvironment, SandboxConfig
+from mortal.rewards.utils import extract_code_from_completion
 
 
 class CodeExecutionEnvironment(RewardEnvironment):

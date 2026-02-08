@@ -1,6 +1,6 @@
 """Reward dispatch layer for pluggable reward functions."""
 
-from MRL.rewards.base import RewardEnvironment
+from mortal.rewards.base import RewardEnvironment
 
 
 def compute_rewards(
@@ -32,7 +32,7 @@ def compute_rewards(
 
     # Legacy: None/"sandbox" -> default CodeExecutionEnvironment
     if reward_funcs is None or reward_funcs == "sandbox":
-        from MRL.rewards.examples.code_execution import CodeExecutionEnvironment
+        from mortal.rewards.examples.code_execution import CodeExecutionEnvironment
 
         env = CodeExecutionEnvironment()
         return env.score_batch(completions, prompts, **kwargs)

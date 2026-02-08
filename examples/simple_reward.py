@@ -4,10 +4,10 @@ Usage:
     python examples/simple_reward.py
 """
 
-from MRL import MRLTrainer
+from mortal import MortalTrainer
 
 if __name__ == "__main__":
-    trainer = MRLTrainer(
+    trainer = MortalTrainer(
         model="Qwen/Qwen2-0.5B-Instruct",
         reward_funcs="sandbox",
         max_steps=2,

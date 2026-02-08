@@ -4,8 +4,8 @@ Functions use the pre-defined TRAINING_IMAGE — pre-warmed, fast, has
 torch/trl/numpy/transformers. For custom images, use sandboxes instead.
 """
 
-from MRL.app import app, TRAINING_IMAGE
-from MRL.rewards.base import ExecutionResult, FunctionConfig
+from mortal.app import app, TRAINING_IMAGE
+from mortal.rewards.base import ExecutionResult, FunctionConfig
 
 
 def _exec_code(code: str) -> dict:
