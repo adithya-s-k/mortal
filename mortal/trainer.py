@@ -1,6 +1,6 @@
 """MortalTrainer - TRL-like programmatic API for MORTAL training."""
 
-from mortal.config import OrchestratorConfig
+from mortal.config import OrchestratorConfig, SingleNode, Distributed, GPUConfig
 from mortal.rewards.base import RewardEnvironment
 
 
@@ -50,6 +50,7 @@ class MortalTrainer:
     def __init__(
         self,
         model="Qwen/Qwen2.5-0.5B-Instruct",
+        mode=None,
         reward_funcs=None,
         reward_weights=None,
         train_dataset=None,
@@ -59,15 +60,10 @@ class MortalTrainer:
         num_epochs=5,
         max_steps=-1,
         loss_type="dapo",
-        actor_gpu="A100",
-        rollout_gpu="A10G",
-        num_rollout_workers=2,
         max_samples=128,
         max_tokens=8000,
         max_model_len=16384,
         max_completion_length=1024,
-        weight_sync_method="reload",
-        sync_weights_every=1,
         save_steps=100,
         beta=0.0,
         epsilon=0.2,
@@ -82,56 +78,50 @@ class MortalTrainer:
         dataset_name="OpenCoder-LLM/opc-sft-stage2",
         dataset_config="educational_instruct",
         dataset_split="train",
+        # Legacy params (deprecated, use mode= instead)
+        actor_gpu=None,
+        rollout_gpu=None,
+        num_rollout_workers=None,
+        weight_sync_method=None,
+        sync_weights_every=None,
         **kwargs,
     ):
         """Initialize MortalTrainer.
 
         Args:
             model: Model name or HuggingFace path.
+            mode: Execution mode. One of:
+                - SingleNode(...): Single container, optional vLLM.
+                - Distributed(...): veRL-style separate actor + rollout workers.
+                - None: defaults to Distributed().
             reward_funcs: Reward function(s). One of:
                 - None or "sandbox": uses Modal Sandbox code execution (default)
                 - RewardEnvironment: custom environment with score() method
                 - callable: custom reward function(completions=..., **kwargs)
                 - list of the above: multiple rewards, weighted average
-            reward_weights: Optional list of weights for combining multiple
-                reward functions. If None, uses RewardEnvironment.weight
-                for environments and 1.0 for callables.
+            reward_weights: Optional list of weights for combining multiple rewards.
             train_dataset: HuggingFace Dataset with "prompt" column.
-                Required for custom reward_funcs, optional for sandbox mode.
-            num_generations: Number of generations per prompt for GRPO.
-            learning_rate: Learning rate.
-            batch_size: Batch size.
-            num_epochs: Number of training epochs.
-            max_steps: Maximum training steps (-1 for unlimited).
-            loss_type: GRPO loss type (grpo, dr_grpo, dapo, bnpo, cispo, sapo).
-            actor_gpu: GPU type for actor worker.
-            rollout_gpu: GPU type for rollout workers.
-            num_rollout_workers: Number of vLLM rollout workers.
-            max_samples: Maximum dataset samples (None for full dataset).
-            max_tokens: Maximum tokens per generated completion.
-            max_model_len: Maximum model context length.
-            max_completion_length: Max completion length for training.
-            weight_sync_method: Weight sync method (reload, volume, direct, checkpoint).
-            sync_weights_every: Sync weights every N steps.
-            save_steps: Save checkpoint every N steps.
-            beta: KL penalty coefficient.
-            epsilon: PPO-style clipping epsilon.
-            epsilon_high: Upper clipping epsilon (None to disable).
-            scale_rewards: Reward scaling (group, batch, none).
-            mask_truncated_completions: Mask truncated completions.
-            use_lora: Enable LoRA.
-            lora_r: LoRA rank.
-            lora_alpha: LoRA alpha.
-            lora_dropout: LoRA dropout.
-            gradient_checkpointing: Enable gradient checkpointing.
-            dataset_name: HuggingFace dataset name (for sandbox mode).
-            dataset_config: Dataset config name.
-            dataset_split: Dataset split.
             **kwargs: Additional config overrides.
         """
         self.reward_funcs = reward_funcs
         self.reward_weights = reward_weights
         self.train_dataset = train_dataset
+
+        # Build mode object
+        if mode is None:
+            # Support legacy params
+            mode_kwargs = {}
+            if actor_gpu is not None:
+                mode_kwargs["actor"] = actor_gpu
+            if rollout_gpu is not None:
+                mode_kwargs["rollout"] = rollout_gpu
+            if num_rollout_workers is not None:
+                mode_kwargs["num_rollout_workers"] = num_rollout_workers
+            if weight_sync_method is not None:
+                mode_kwargs["weight_sync_method"] = weight_sync_method
+            if sync_weights_every is not None:
+                mode_kwargs["sync_weights_every"] = sync_weights_every
+            mode = Distributed(**mode_kwargs) if mode_kwargs else Distributed()
 
         config_dict = {
             "model_name": model,
@@ -141,15 +131,10 @@ class MortalTrainer:
             "num_epochs": num_epochs,
             "max_steps": max_steps,
             "loss_type": loss_type,
-            "actor_gpu": actor_gpu,
-            "rollout_gpu": rollout_gpu,
-            "num_rollout_workers": num_rollout_workers,
             "max_samples": max_samples,
             "max_tokens": max_tokens,
             "max_model_len": max_model_len,
             "max_completion_length": max_completion_length,
-            "weight_sync_method": weight_sync_method,
-            "sync_weights_every": sync_weights_every,
             "save_steps": save_steps,
             "beta": beta,
             "epsilon": epsilon,
@@ -164,21 +149,23 @@ class MortalTrainer:
             "dataset_name": dataset_name,
             "dataset_config": dataset_config,
             "dataset_split": dataset_split,
+            "mode": mode.to_dict(),
         }
         config_dict.update(kwargs)
 
         self.config = OrchestratorConfig.from_dict(config_dict)
 
-    def train(self):
+    def train(self, detach=False):
         """Run training.
+
+        Args:
+            detach: If True, the training runs on Modal independently of the
+                local process. The terminal can be closed and training continues.
+                If False (default), blocks until training completes.
 
         Routes to the appropriate backend:
         - Remote (Modal orchestrator) for sandbox rewards
         - Local orchestrator for custom reward functions
-
-        Both paths require a Modal App context (for GPU workers), so
-        we wrap in app.run() to hydrate the app when called from a
-        regular Python script (outside `modal run`).
         """
         import modal
         from mortal.app import app
@@ -189,16 +176,46 @@ class MortalTrainer:
         import mortal.rewards.function_executor  # noqa: F401  — hydrate _run_on_training_image
 
         with modal.enable_output():
-            with app.run():
-                if self.reward_funcs is None or self.reward_funcs == "sandbox":
-                    print("Using remote orchestrator (sandbox rewards on Modal)")
-                    return _orch.train.remote(self.config.to_dict())
-                else:
-                    # RewardEnvironment, callable, or list -> local orchestrator
-                    print("Using local orchestrator (custom rewards)")
-                    return _orch.train_local(
-                        self.config.to_dict(),
-                        self.reward_funcs,
-                        self.train_dataset,
-                        self.reward_weights,
+            with app.run(detach=detach):
+                mode = self.config.mode
+
+                if isinstance(mode, SingleNode):
+                    gpu_spec = mode.gpu.to_modal_spec()
+                    print(f"Using single-node training (gpu={gpu_spec}, "
+                          f"use_vllm={mode.use_vllm}, vllm_mode={mode.vllm_mode})")
+                    worker = _orch.SingleNodeTrainer.with_options(gpu=gpu_spec)()
+                    # Pass custom reward_funcs and train_dataset if provided
+                    reward_funcs = self.reward_funcs if self.reward_funcs not in [None, "sandbox"] else None
+                    # Convert HF dataset to in-memory format for serialization
+                    # (memory-mapped arrow files reference local paths that don't exist on Modal)
+                    train_ds = self.train_dataset
+                    if train_ds is not None:
+                        from datasets import Dataset
+                        train_ds = Dataset.from_dict(train_ds.to_dict())
+                    run_kwargs = dict(
+                        config_dict=self.config.to_dict(),
+                        reward_funcs=reward_funcs,
+                        train_dataset=train_ds,
                     )
+                    if detach:
+                        worker.run.spawn(**run_kwargs)
+                        print("Training spawned in detached mode. Check Modal dashboard for progress.")
+                        return None
+                    return worker.run.remote(**run_kwargs)
+
+                elif isinstance(mode, Distributed):
+                    print("Using remote orchestrator (distributed on Modal)")
+                    reward_funcs = self.reward_funcs if self.reward_funcs not in [None, "sandbox"] else None
+                    # Convert HF dataset for serialization
+                    train_ds = self.train_dataset
+                    if train_ds is not None:
+                        from datasets import Dataset
+                        train_ds = Dataset.from_dict(train_ds.to_dict())
+                    if detach:
+                        _orch.train.spawn(self.config.to_dict(), reward_funcs=reward_funcs, train_dataset=train_ds)
+                        print("Training spawned in detached mode. Check Modal dashboard for progress.")
+                        return None
+                    return _orch.train.remote(self.config.to_dict(), reward_funcs=reward_funcs, train_dataset=train_ds)
+
+                else:
+                    raise ValueError(f"Unknown mode type: {type(mode)}")

@@ -125,7 +125,28 @@ def reward_helper_function(
     return compute_reward.starmap(zip(completions, testcases))
 
 
-# Additional reward functions can be defined here
+def function_reward_function(
+    completions: Sequence[str], testcases: Sequence[Sequence[str]], **kwargs
+) -> list[float]:
+    """TRL-compatible reward function using Modal Function execution.
+
+    Faster than sandbox-based rewards (pre-warmed containers) but less isolated.
+    Uses _run_on_training_image from function_executor.py.
+
+    Args:
+        completions: Sequence of model completions
+        testcases: Sequence of test case lists
+        **kwargs: Additional arguments (ignored)
+
+    Returns:
+        List of reward scores (0 or 1)
+    """
+    from mortal.rewards.function_executor import _run_on_training_image
+
+    codes = [get_generated_code_and_test_cases(c, t) for c, t in zip(completions, testcases)]
+    args = [(code,) for code in codes]
+    raw_results = list(_run_on_training_image.starmap(args))
+    return [1.0 if r["success"] else 0.0 for r in raw_results]
 
 
 @app.function()
@@ -181,3 +202,35 @@ def partial_credit_reward_function(
         Iterable of reward scores (0 to 1)
     """
     return compute_reward_with_partial_credit.starmap(zip(completions, testcases))
+
+
+def local_reward_function(
+    completions: Sequence[str], testcases: Sequence[Sequence[str]], **kwargs
+) -> list[float]:
+    """TRL-compatible reward function using local in-process code execution.
+
+    Faster than sandbox-based rewards (no container overhead) but less isolated.
+    Executes code in a subprocess with a timeout.
+
+    Args:
+        completions: Sequence of model completions
+        testcases: Sequence of test case lists
+        **kwargs: Additional arguments (ignored)
+
+    Returns:
+        List of reward scores (0 or 1)
+    """
+    import subprocess as sp
+
+    results = []
+    for completion, testcase in zip(completions, testcases):
+        code = get_generated_code_and_test_cases(completion, testcase)
+        try:
+            proc = sp.run(
+                ["python", "-c", code],
+                capture_output=True, timeout=30, text=True,
+            )
+            results.append(1.0 if proc.returncode == 0 else 0.0)
+        except (sp.TimeoutExpired, Exception):
+            results.append(0.0)
+    return results

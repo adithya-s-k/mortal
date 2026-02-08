@@ -21,7 +21,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 from mortal.app import app, volume, TRAINING_IMAGE, VLLM_IMAGE
-from mortal.config import OrchestratorConfig, ModelConfig, TrainingConfig, GenerationConfig
+from mortal.config import OrchestratorConfig, ModelConfig, TrainingConfig, GenerationConfig, GPUConfig, SingleNode, Distributed
 from mortal.trainer import MortalTrainer
 from mortal.rewards.base import RewardEnvironment, SandboxConfig, FunctionConfig, ExecutionResult
 
@@ -34,6 +34,9 @@ __all__ = [
     "ModelConfig",
     "TrainingConfig",
     "GenerationConfig",
+    "GPUConfig",
+    "SingleNode",
+    "Distributed",
     "MortalTrainer",
     "RewardEnvironment",
     "SandboxConfig",

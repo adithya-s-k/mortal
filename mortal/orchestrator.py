@@ -67,7 +67,7 @@ def chunk_list(lst: list, num_chunks: int) -> list[list]:
     timeout=3600 * 24,  # 24 hours
     secrets=[modal.Secret.from_name("adithya-hf-wandb")],
 )
-def train(config_dict: Optional[dict] = None, reward_funcs=None):
+def train(config_dict: Optional[dict] = None, reward_funcs=None, train_dataset=None):
     """Main training orchestrator - veRL style.
 
     Coordinates the training loop:
@@ -82,6 +82,9 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
         config_dict: Configuration dictionary (optional, uses defaults if None)
         reward_funcs: Reward function(s) - None/"sandbox" for Modal Sandbox,
             callable or list of callables for custom rewards.
+        train_dataset: Optional HuggingFace Dataset with "prompt" column.
+            If provided, used directly (no column renaming).
+            If None, loaded from config with default column renaming.
 
     Returns:
         Training result summary
@@ -104,19 +107,25 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
     )
 
     # Load dataset
-    print("Loading dataset...")
-    dataset = load_dataset(
-        config.dataset_name,
-        config.dataset_config,
-        split=config.dataset_split,
-    )
-    dataset = dataset.rename_column("instruction", "prompt")
-    dataset = dataset.rename_column("testcase", "testcases")
+    if train_dataset is not None:
+        dataset = train_dataset
+        if config.max_samples:
+            dataset = dataset.select(range(min(config.max_samples, len(dataset))))
+        print(f"Using provided dataset with {len(dataset)} samples")
+    else:
+        print("Loading dataset...")
+        dataset = load_dataset(
+            config.dataset_name,
+            config.dataset_config,
+            split=config.dataset_split,
+        )
+        dataset = dataset.rename_column("instruction", "prompt")
+        dataset = dataset.rename_column("testcase", "testcases")
 
-    if config.max_samples:
-        dataset = dataset.select(range(min(config.max_samples, len(dataset))))
+        if config.max_samples:
+            dataset = dataset.select(range(min(config.max_samples, len(dataset))))
 
-    print(f"Dataset loaded with {len(dataset)} samples")
+        print(f"Dataset loaded with {len(dataset)} samples")
 
     # Initialize workers with configurable GPU types
     actor_gpu = config.actor_gpu
@@ -203,6 +212,58 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
     else:
         current_rollout_model_path = config.model.model_name
 
+    # If prompts are chat-format (list of dicts), apply chat template to convert to strings
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(config.model.model_name, trust_remote_code=True)
+
+    sample_prompt = dataset[0]["prompt"]
+    if isinstance(sample_prompt, list) and len(sample_prompt) > 0 and isinstance(sample_prompt[0], dict):
+        print("Detected chat-format prompts, applying chat template...")
+        def apply_chat_template(example):
+            example["prompt"] = tokenizer.apply_chat_template(
+                example["prompt"], tokenize=False, add_generation_prompt=True,
+            )
+            return example
+        dataset = dataset.map(apply_chat_template)
+
+    # Determine extra columns for reward kwargs
+    extra_columns = [c for c in dataset.column_names if c != "prompt"]
+
+    # Wrap reward_funcs if custom (RewardEnvironment instances → TRL-compatible callables)
+    if reward_funcs is not None and reward_funcs != "sandbox":
+        if not isinstance(reward_funcs, list):
+            reward_funcs = [reward_funcs]
+
+        def _wrap_env(env):
+            """Wrap a RewardEnvironment into a callable for compute_rewards."""
+            def _reward(completions, **kw):
+                # Extract text from TRL chat format if needed
+                texts = []
+                for c in completions:
+                    if isinstance(c, list) and len(c) > 0 and isinstance(c[0], dict):
+                        texts.append(c[0]["content"])
+                    else:
+                        texts.append(c)
+                prompts = kw.pop("prompts", [""] * len(texts))
+                print(f"[_wrap_env] Calling {getattr(env, 'name', 'RewardEnv')}.score_batch "
+                      f"with {len(texts)} completions")
+                try:
+                    result = env.score_batch(texts, prompts, **kw)
+                    print(f"[_wrap_env] Result: {result}")
+                    return result
+                except Exception as e:
+                    print(f"[_wrap_env] ERROR: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return [0.0] * len(texts)
+            _reward.__name__ = getattr(env, "name", "RewardEnv")
+            return _reward
+
+        reward_funcs = [
+            _wrap_env(rf) if isinstance(rf, RewardEnvironment) else rf
+            for rf in reward_funcs
+        ]
+
     # Training loop
     global_step = 0
     for epoch in range(config.training.num_epochs):
@@ -216,9 +277,11 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
                 break
 
             # 1. Get batch
-            batch = get_batch(dataset, batch_idx, batch_size)
-            prompts = batch["prompts"]
-            testcases = batch["testcases"]
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(dataset))
+            batch = dataset.select(range(start_idx, end_idx))
+            prompts = batch["prompt"]
+            batch_kwargs = {col: batch[col] for col in extra_columns}
 
             print(
                 f"\nStep {global_step + 1}/{total_steps}: Processing {len(prompts)} prompts"
@@ -227,11 +290,12 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
             # 2. Generate completions (parallel across rollout workers)
             # Expand prompts for multiple generations per prompt
             expanded_prompts = []
-            expanded_testcases = []
-            for p, t in zip(prompts, testcases):
+            expanded_kwargs = {col: [] for col in extra_columns}
+            for i, p in enumerate(prompts):
                 for _ in range(config.training.num_generations):
                     expanded_prompts.append(p)
-                    expanded_testcases.append(t)
+                    for col in extra_columns:
+                        expanded_kwargs[col].append(batch_kwargs[col][i])
 
             # Chunk prompts across workers
             prompt_chunks = chunk_list(expanded_prompts, config.num_rollout_workers)
@@ -261,12 +325,15 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
             print(f"Generated {len(all_completions)} completions")
 
             # 3. Compute rewards (parallel via sandboxes or custom reward_funcs)
+            # Wrap plain string completions into TRL chat format so reward
+            # functions written for TRL work identically in distributed mode
+            wrapped_completions = [[{"role": "assistant", "content": c}] for c in all_completions]
             print("Computing rewards...")
             rewards = compute_rewards(
                 reward_funcs=reward_funcs,
-                completions=all_completions,
+                completions=wrapped_completions,
                 prompts=expanded_prompts,
-                testcases=expanded_testcases,
+                **expanded_kwargs,
             )
             mean_reward = sum(rewards) / len(rewards) if rewards else 0
 
@@ -444,120 +511,198 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None):
     }
 
 
-@app.function(
+@app.cls(
     image=TRAINING_IMAGE,
     gpu="A100",
     volumes={STORAGE_PATH: volume},
     timeout=3600 * 24,
     secrets=[modal.Secret.from_name("adithya-hf-wandb")],
 )
-def train_simple(config_dict: Optional[dict] = None):
-    """Simple training using TRL's built-in trainer loop.
+class SingleNodeTrainer:
+    """Single-node trainer using TRL's GRPOTrainer directly."""
 
-    This is a simpler alternative that uses GRPOTrainer's internal
-    training loop instead of manual orchestration. Useful for debugging
-    or when the manual orchestration overhead is not needed.
+    @modal.method()
+    def run(self, config_dict: Optional[dict] = None, reward_funcs=None, train_dataset=None):
+        """Single-node training with optional vLLM support.
 
-    Args:
-        config_dict: Configuration dictionary
+        Args:
+            config_dict: Configuration dictionary.
+            reward_funcs: Optional reward function(s) — callable or list of callables.
+                If provided, passed directly to GRPOTrainer (TRL-compatible).
+                If None, falls back to sandbox/local reward based on mode.reward_type.
+            train_dataset: Optional HuggingFace Dataset with "prompt" column.
+                If provided, used directly (no column renaming).
+                If None, loaded from config with default column renaming.
+        """
+        import os
+        import subprocess
 
-    Returns:
-        Training result summary
-    """
-    from datasets import load_dataset
-    from trl import GRPOConfig, GRPOTrainer
-    import torch
+        from mortal.config import OrchestratorConfig, SingleNode as SingleNodeMode
 
-    from mortal.workers.reward import reward_helper_function
+        if config_dict is None:
+            config_dict = {}
+        config = OrchestratorConfig.from_dict(config_dict)
+        mode = config.mode
+        assert isinstance(mode, SingleNodeMode), f"SingleNodeTrainer requires SingleNode mode, got {type(mode)}"
 
-    # Parse config
-    if config_dict is None:
-        config_dict = {}
-    config = OrchestratorConfig.from_dict(config_dict)
+        print(f"Starting single-node training: model={config.model.model_name}, "
+              f"gpu={mode.gpu.to_modal_spec()}, use_vllm={mode.use_vllm}, "
+              f"vllm_mode={mode.vllm_mode}, reward_type={mode.reward_type}")
 
-    print(f"Starting simple training with config: {config.to_dict()}")
+        # vLLM setup — MUST happen before importing torch to set CUDA_VISIBLE_DEVICES
+        use_vllm = mode.use_vllm
+        vllm_mode = None
 
-    # Load dataset
-    dataset = load_dataset(
-        config.dataset_name,
-        config.dataset_config,
-        split=config.dataset_split,
-    )
-    dataset = dataset.rename_column("instruction", "prompt")
-    dataset = dataset.rename_column("testcase", "testcases")
+        if use_vllm:
+            if mode.vllm_mode == "serve":
+                vllm_mode = "server"
+                # vLLM server on GPU 0
+                env_copy = os.environ.copy()
+                env_copy["CUDA_VISIBLE_DEVICES"] = "0"
+                subprocess.Popen(
+                    ["trl", "vllm-serve", "--model", config.model.model_name],
+                    env=env_copy,
+                )
+                # Training on remaining GPUs — set BEFORE torch import
+                training_gpus = ",".join(str(i) for i in range(1, mode.gpu.count))
+                os.environ["CUDA_VISIBLE_DEVICES"] = training_gpus
+            elif mode.vllm_mode == "colocate":
+                vllm_mode = "colocate"
+                os.environ["RANK"] = "0"
+                os.environ["LOCAL_RANK"] = "0"
+                os.environ["WORLD_SIZE"] = "1"
+                os.environ["MASTER_ADDR"] = "localhost"
+                os.environ["MASTER_PORT"] = "12355"
 
-    if config.max_samples:
-        dataset = dataset.select(range(min(config.max_samples, len(dataset))))
+        # Now safe to import torch (CUDA_VISIBLE_DEVICES is already set)
+        import torch
+        from datasets import load_dataset
+        from trl import GRPOConfig, GRPOTrainer
 
-    print(f"Dataset loaded with {len(dataset)} samples")
+        # Load dataset
+        if train_dataset is not None:
+            dataset = train_dataset
+            if config.max_samples:
+                dataset = dataset.select(range(min(config.max_samples, len(dataset))))
+            print(f"Using provided dataset with {len(dataset)} samples")
+        else:
+            dataset = load_dataset(
+                config.dataset_name, config.dataset_config, split=config.dataset_split,
+            )
+            dataset = dataset.rename_column("instruction", "prompt")
+            dataset = dataset.rename_column("testcase", "testcases")
+            if config.max_samples:
+                dataset = dataset.select(range(min(config.max_samples, len(dataset))))
+            print(f"Dataset loaded with {len(dataset)} samples")
 
-    # Build GRPOConfig kwargs
-    grpo_kwargs = {
-        "output_dir": f"{STORAGE_PATH}/checkpoints",
-        "report_to": config.training.report_to,
-        "use_vllm": False,
-        "per_device_train_batch_size": config.training.batch_size,
-        "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
-        "learning_rate": config.training.learning_rate,
-        "num_train_epochs": config.training.num_epochs,
-        "max_steps": config.training.max_steps,
-        "save_steps": config.training.save_steps,
-        "logging_steps": config.training.logging_steps,
-        "num_generations": config.training.num_generations,
-        "bf16": torch.cuda.is_bf16_supported(),
-        "gradient_checkpointing": True,
-        # GRPO algorithm parameters (TRL built-in)
-        "loss_type": config.training.loss_type,
-        "beta": config.training.beta,
-        "epsilon": config.training.epsilon,
-        "scale_rewards": config.training.scale_rewards,
-        "mask_truncated_completions": config.training.mask_truncated_completions,
-    }
+        # Build GRPOConfig
+        grpo_kwargs = {
+            "output_dir": f"{STORAGE_PATH}/checkpoints",
+            "report_to": config.training.report_to,
+            "use_vllm": use_vllm,
+            "per_device_train_batch_size": config.training.batch_size,
+            "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
+            "learning_rate": config.training.learning_rate,
+            "num_train_epochs": config.training.num_epochs,
+            "max_steps": config.training.max_steps,
+            "save_steps": config.training.save_steps,
+            "logging_steps": config.training.logging_steps,
+            "num_generations": config.training.num_generations,
+            "bf16": torch.cuda.is_bf16_supported(),
+            "gradient_checkpointing": config.training.gradient_checkpointing,
+            "loss_type": config.training.loss_type,
+            "beta": config.training.beta,
+            "epsilon": config.training.epsilon,
+            "scale_rewards": config.training.scale_rewards,
+            "mask_truncated_completions": config.training.mask_truncated_completions,
+            "max_completion_length": config.training.max_completion_length,
+        }
+        if vllm_mode is not None:
+            grpo_kwargs["vllm_mode"] = vllm_mode
+        if config.training.epsilon_high is not None:
+            grpo_kwargs["epsilon_high"] = config.training.epsilon_high
 
-    # Only add epsilon_high if specified
-    if config.training.epsilon_high is not None:
-        grpo_kwargs["epsilon_high"] = config.training.epsilon_high
+        training_args = GRPOConfig(**grpo_kwargs)
 
-    training_args = GRPOConfig(**grpo_kwargs)
+        # LoRA
+        peft_config = None
+        if config.training.use_lora:
+            from peft import LoraConfig, TaskType
 
-    # Configure LoRA if enabled
-    peft_config = None
-    if config.training.use_lora:
-        from peft import LoraConfig, TaskType
+            target_modules = config.training.lora_target_modules or [
+                "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
+            ]
+            peft_config = LoraConfig(
+                r=config.training.lora_r,
+                lora_alpha=config.training.lora_alpha,
+                lora_dropout=config.training.lora_dropout,
+                target_modules=target_modules,
+                task_type=TaskType.CAUSAL_LM,
+                bias="none",
+            )
+            print(f"LoRA enabled: r={peft_config.r}, alpha={peft_config.lora_alpha}")
 
-        target_modules = config.training.lora_target_modules
-        if target_modules is None:
-            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        # Select reward function(s)
+        if reward_funcs is not None:
+            from mortal.rewards.base import RewardEnvironment as _RE
 
-        peft_config = LoraConfig(
-            r=config.training.lora_r,
-            lora_alpha=config.training.lora_alpha,
-            lora_dropout=config.training.lora_dropout,
-            target_modules=target_modules,
-            task_type=TaskType.CAUSAL_LM,
-            bias="none",
-        )
-        print(f"LoRA enabled: r={peft_config.r}, alpha={peft_config.lora_alpha}")
+            def _wrap_env(env):
+                """Wrap a RewardEnvironment into a TRL-compatible callable."""
+                def _trl_reward(completions, **kw):
+                    # TRL passes completions as list of list of dicts
+                    texts = [c[0]["content"] for c in completions]
+                    prompts = kw.pop("prompts", [""] * len(texts))
+                    print(f"[_wrap_env] Calling {getattr(env, 'name', 'RewardEnv')}.score_batch "
+                          f"with {len(texts)} completions, kwargs keys: {list(kw.keys())}")
+                    try:
+                        result = env.score_batch(texts, prompts, **kw)
+                        print(f"[_wrap_env] Result: {result}")
+                        return result
+                    except Exception as e:
+                        print(f"[_wrap_env] ERROR: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        return [0.0] * len(texts)
+                _trl_reward.__name__ = getattr(env, "name", "RewardEnv")
+                return _trl_reward
 
-    # Create trainer
-    trainer_kwargs = {
-        "model": config.model.model_name,
-        "reward_funcs": reward_helper_function,
-        "args": training_args,
-        "train_dataset": dataset,
-    }
-    if peft_config is not None:
-        trainer_kwargs["peft_config"] = peft_config
+            # Normalize to list, wrap any RewardEnvironment instances
+            if not isinstance(reward_funcs, list):
+                reward_funcs = [reward_funcs]
+            selected_reward_fn = [
+                _wrap_env(rf) if isinstance(rf, _RE) else rf
+                for rf in reward_funcs
+            ]
+            print(f"Using custom reward function(s): {selected_reward_fn}")
+        elif mode.reward_type == "function":
+            from mortal.workers.reward import function_reward_function
+            print("Using function-based reward execution (pre-warmed Modal Functions)")
+            selected_reward_fn = function_reward_function
+        elif mode.reward_type == "local":
+            from mortal.workers.reward import local_reward_function
+            print("Using local (in-process) reward execution")
+            selected_reward_fn = local_reward_function
+        else:
+            from mortal.workers.reward import reward_helper_function
+            print("Using sandbox-based reward execution")
+            selected_reward_fn = reward_helper_function
 
-    trainer = GRPOTrainer(**trainer_kwargs)
+        # Create trainer
+        trainer_kwargs = {
+            "model": config.model.model_name,
+            "reward_funcs": selected_reward_fn,
+            "args": training_args,
+            "train_dataset": dataset,
+        }
+        if peft_config is not None:
+            trainer_kwargs["peft_config"] = peft_config
 
-    # Train
-    trainer.train()
+        trainer = GRPOTrainer(**trainer_kwargs)
+        trainer.train()
 
-    # Commit volume
-    volume.commit()
+        volume.commit()
 
-    return {"status": "completed"}
+        return {"status": "completed", "mode": "single_node"}
 
 
 def train_local(config_dict: dict, reward_funcs, train_dataset=None, reward_weights=None):

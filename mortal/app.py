@@ -47,7 +47,6 @@ VLLM_IMAGE = (
     .add_local_python_source("mortal")
 )
 
-# Image imports for type checking
-with TRAINING_IMAGE.imports():
-    from datasets import Dataset, load_dataset
-    from trl import GRPOConfig, GRPOTrainer
+# NOTE: Do NOT use `with TRAINING_IMAGE.imports()` to eagerly import torch/trl.
+# This would initialize CUDA before CUDA_VISIBLE_DEVICES can be set in serve mode,
+# causing GPU device conflicts. Import torch/trl lazily inside methods instead.

@@ -1,7 +1,7 @@
 """Configuration dataclasses for GRPO training."""
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 
 @dataclass
@@ -85,6 +85,133 @@ class TrainingConfig:
 
 
 @dataclass
+class GPUConfig:
+    """Structured GPU specification."""
+
+    gpu_type: str = "A100"
+    count: int = 1
+    instances: int = 1  # Number of parallel instances (for distributed rollout workers)
+
+    def to_modal_spec(self) -> str:
+        """Convert to Modal GPU spec string (e.g., 'A100:8')."""
+        if self.count > 1:
+            return f"{self.gpu_type}:{self.count}"
+        return self.gpu_type
+
+    @classmethod
+    def from_string(cls, spec: str) -> "GPUConfig":
+        """Parse from string like 'A100', 'A100:8'."""
+        if ":" in spec:
+            gpu_type, count_str = spec.split(":", 1)
+            return cls(gpu_type=gpu_type, count=int(count_str))
+        return cls(gpu_type=spec)
+
+    def to_dict(self) -> dict:
+        return {"gpu_type": self.gpu_type, "count": self.count, "instances": self.instances}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GPUConfig":
+        return cls(
+            gpu_type=d.get("gpu_type", "A100"),
+            count=d.get("count", 1),
+            instances=d.get("instances", 1),
+        )
+
+
+@dataclass
+class SingleNode:
+    """Single-node execution mode. Runs TRL's GRPOTrainer directly.
+
+    Everything runs in one Modal container. Supports optional vLLM
+    for faster generation via colocate (shared GPU) or serve (subprocess).
+    """
+
+    gpu: Union[str, GPUConfig] = "A100"
+    use_vllm: bool = False
+    vllm_mode: str = "colocate"  # "colocate" or "serve"
+    reward_type: str = "sandbox"  # "sandbox" (Modal Sandbox), "function" (pre-warmed Modal Function), or "local" (in-process exec)
+
+    def __post_init__(self):
+        if isinstance(self.gpu, str):
+            self.gpu = GPUConfig.from_string(self.gpu)
+        if self.use_vllm and self.vllm_mode == "serve" and self.gpu.count < 2:
+            raise ValueError(
+                f"vllm_mode='serve' requires at least 2 GPUs, got {self.gpu.count}. "
+                f"Use GPUConfig('{self.gpu.gpu_type}', count=2) or vllm_mode='colocate'."
+            )
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "SingleNode",
+            "gpu": self.gpu.to_dict(),
+            "use_vllm": self.use_vllm,
+            "vllm_mode": self.vllm_mode,
+            "reward_type": self.reward_type,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SingleNode":
+        gpu = GPUConfig.from_dict(d["gpu"]) if isinstance(d.get("gpu"), dict) else d.get("gpu", "A100")
+        return cls(
+            gpu=gpu,
+            use_vllm=d.get("use_vllm", False),
+            vllm_mode=d.get("vllm_mode", "colocate"),
+            reward_type=d.get("reward_type", "sandbox"),
+        )
+
+
+@dataclass
+class Distributed:
+    """Distributed execution mode. Separate ActorWorker + RolloutWorker(s).
+
+    veRL-style orchestration with actors and rollout workers on different
+    GPU types. Supports horizontal scaling of rollout workers.
+    """
+
+    actor: Union[str, GPUConfig] = field(default_factory=lambda: GPUConfig("A100"))
+    rollout: Union[str, GPUConfig] = field(default_factory=lambda: GPUConfig("A10G", instances=2))
+    weight_sync_method: str = "reload"
+    sync_weights_every: int = 1
+    num_rollout_workers: int = 2
+
+    def __post_init__(self):
+        if isinstance(self.actor, str):
+            self.actor = GPUConfig.from_string(self.actor)
+        if isinstance(self.rollout, str):
+            self.rollout = GPUConfig.from_string(self.rollout)
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "Distributed",
+            "actor": self.actor.to_dict(),
+            "rollout": self.rollout.to_dict(),
+            "weight_sync_method": self.weight_sync_method,
+            "sync_weights_every": self.sync_weights_every,
+            "num_rollout_workers": self.num_rollout_workers,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Distributed":
+        actor = GPUConfig.from_dict(d["actor"]) if isinstance(d.get("actor"), dict) else d.get("actor", "A100")
+        rollout = GPUConfig.from_dict(d["rollout"]) if isinstance(d.get("rollout"), dict) else d.get("rollout", "A10G")
+        return cls(
+            actor=actor,
+            rollout=rollout,
+            weight_sync_method=d.get("weight_sync_method", "reload"),
+            sync_weights_every=d.get("sync_weights_every", 1),
+            num_rollout_workers=d.get("num_rollout_workers", 2),
+        )
+
+
+def _mode_from_dict(d: dict) -> Union[SingleNode, Distributed]:
+    """Deserialize a mode object from dict."""
+    mode_type = d.get("type", "Distributed")
+    if mode_type == "SingleNode":
+        return SingleNode.from_dict(d)
+    return Distributed.from_dict(d)
+
+
+@dataclass
 class OrchestratorConfig:
     """Configuration for the training orchestrator."""
 
@@ -97,18 +224,28 @@ class OrchestratorConfig:
     # Generation
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
-    # Workers
-    num_rollout_workers: int = 2
+    # Execution mode
+    mode: Union[SingleNode, Distributed] = field(default_factory=Distributed)
 
-    # GPU allocation
-    actor_gpu: str = "A100"    # "A100", "H100", "A10G", etc.
-    rollout_gpu: str = "A10G"  # "A10G", "A100", "L4", etc.
+    # Legacy fields (populated from mode for backward compat in to_dict)
+    num_rollout_workers: int = 2
+    actor_gpu: str = "A100"
+    rollout_gpu: str = "A10G"
 
     # Data
     dataset_name: str = "OpenCoder-LLM/opc-sft-stage2"
     dataset_config: str = "educational_instruct"
     dataset_split: str = "train"
     max_samples: Optional[int] = 128  # None for full dataset
+
+    def __post_init__(self):
+        """Sync legacy fields from mode object."""
+        if isinstance(self.mode, Distributed):
+            self.actor_gpu = self.mode.actor.to_modal_spec()
+            self.rollout_gpu = self.mode.rollout.to_modal_spec()
+            self.num_rollout_workers = self.mode.num_rollout_workers
+            self.training.weight_sync_method = self.mode.weight_sync_method
+            self.training.sync_weights_every = self.mode.sync_weights_every
 
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
@@ -153,6 +290,7 @@ class OrchestratorConfig:
             "dataset_config": self.dataset_config,
             "dataset_split": self.dataset_split,
             "max_samples": self.max_samples,
+            "mode": self.mode.to_dict(),
         }
 
     @classmethod
@@ -197,13 +335,24 @@ class OrchestratorConfig:
             sync_weights_every=d.get("sync_weights_every", 1),
             weight_sync_method=d.get("weight_sync_method", "reload"),
         )
+        # Restore mode from dict, or build Distributed from legacy fields
+        if "mode" in d and isinstance(d["mode"], dict):
+            mode = _mode_from_dict(d["mode"])
+        else:
+            # Legacy: build Distributed from flat fields
+            mode = Distributed(
+                actor=d.get("actor_gpu", "A100"),
+                rollout=d.get("rollout_gpu", "A10G"),
+                weight_sync_method=d.get("weight_sync_method", "reload"),
+                sync_weights_every=d.get("sync_weights_every", 1),
+                num_rollout_workers=d.get("num_rollout_workers", 2),
+            )
+
         return cls(
             model=model,
             generation=generation,
             training=training,
-            num_rollout_workers=d.get("num_rollout_workers", 2),
-            actor_gpu=d.get("actor_gpu", "A100"),
-            rollout_gpu=d.get("rollout_gpu", "A10G"),
+            mode=mode,
             dataset_name=d.get("dataset_name", "OpenCoder-LLM/opc-sft-stage2"),
             dataset_config=d.get("dataset_config", "educational_instruct"),
             dataset_split=d.get("dataset_split", "train"),
