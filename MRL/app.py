@@ -1,15 +1,11 @@
 """Modal app, images, and volume definitions for GRPO training."""
 
-from pathlib import Path
-
 import modal
 
 # Modal App
 app = modal.App("modal-grpo-trl")
 
 # Paths
-SCRIPT_DIR = Path(__file__).parent
-TRL_DIR = SCRIPT_DIR.parent / "trl"
 STORAGE_PATH = "/storage"
 
 # Single unified volume for all storage
@@ -26,14 +22,8 @@ TRAINING_IMAGE = (
     )
     .apt_install("libglib2.0-0", "libgl1", "libglx-mesa0", "libgl1-mesa-dri", "git")
     .run_commands("pip install uv")
-    .add_local_dir(
-        str(TRL_DIR),
-        remote_path="/opt/trl",
-        copy=True,
-        ignore=["**/__pycache__", "**/*.pyc", "**/.git", "**/.venv", "**/.*"],
-    )
     .run_commands(
-        "uv pip install '/opt/trl[vllm]' --system",
+        "uv pip install 'trl[vllm]' --system",
         "uv pip install wandb datasets accelerate peft bitsandbytes hf_transfer --system",
     )
     .env({

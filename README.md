@@ -1,6 +1,6 @@
 # MRL - Modal Reinforcement Learning
 
-A serverless GRPO (Group Relative Policy Optimization) training framework on [Modal](https://modal.com), with TRL and vLLM. Supports pluggable reward functions, configurable GPU allocation, and a TRL-like programmatic API.
+A serverless reinforcement learning framework for LLMs on [Modal](https://modal.com). Built on TRL and vLLM, MRL supports any RL algorithm available in TRL (GRPO, PPO, DPO, etc.) with pluggable reward functions, configurable GPU allocation, and a simple programmatic API. Currently ships with GRPO as the default training algorithm.
 
 ## Architecture
 
@@ -9,7 +9,7 @@ User's Machine (CPU)                    Modal Cloud
 +---------------------+      +------------------------------+
 |                     |      |                              |
 |  MRLTrainer         |      |  ActorWorker (GPU)           |
-|  +- config          |----->|  +- GRPO training step       |
+|  +- config          |----->|  +- RL training step         |
 |  +- reward_funcs    |      |  +- weight sync              |
 |  +- train()         |      |  +- checkpoint               |
 |       |             |      |                              |
@@ -23,7 +23,7 @@ User's Machine (CPU)                    Modal Cloud
 +---------------------+      +------------------------------+
 ```
 
-- **ActorWorker**: GRPO loss computation on GPU (A100 by default, configurable)
+- **ActorWorker**: RL training step on GPU (A100 by default, configurable)
 - **RolloutWorker**: vLLM inference on GPU (A10G by default, configurable)
 - **Reward**: Modal Sandbox (code execution) or custom CPU functions
 
@@ -157,12 +157,12 @@ def my_reward(completions, ground_truths, metadata, **kwargs):
 | `actor_gpu` | `A100` | GPU for training worker |
 | `rollout_gpu` | `A10G` | GPU for vLLM rollout workers |
 | `num_rollout_workers` | `2` | Number of parallel rollout workers |
-| `num_generations` | `4` | Generations per prompt for GRPO |
+| `num_generations` | `4` | Generations per prompt |
 | `batch_size` | `8` | Prompts per training step |
 | `learning_rate` | `5e-6` | Learning rate |
 | `max_steps` | `-1` | Max training steps (-1 = use epochs) |
 | `num_epochs` | `5` | Number of training epochs |
-| `loss_type` | `dapo` | GRPO loss variant (grpo/dapo/dr_grpo/bnpo/cispo/sapo) |
+| `loss_type` | `dapo` | Loss variant (grpo/dapo/dr_grpo/bnpo/cispo/sapo) |
 | `weight_sync_method` | `reload` | How to sync weights (reload/volume/direct/checkpoint) |
 | `use_lora` | `False` | Enable LoRA training |
 | `beta` | `0.0` | KL penalty coefficient |
@@ -186,7 +186,7 @@ All MRLTrainer parameters are available as CLI args via `modal run MRL/train.py:
 |--------|-------|-------------|
 | `reload` (default) | Fast (~2-3s) | vLLM v1 sleep/wake_up/reload_weights pattern |
 | `volume` | Medium (~10-20s) | Save to shared volume, workers reload |
-| `direct` | Fast | In-memory transfer via vLLM load_weights |
+| `direct` | Fast | In-memory transfer via vLLM load_weights (WIP) |
 | `checkpoint` | Slow (~30-40s) | Full checkpoint save + model recreation |
 
 ## How It Works
@@ -224,7 +224,7 @@ All MRLTrainer parameters are available as CLI args via `modal run MRL/train.py:
 |                    v                                                |
 |  4. TRAIN STEP                                                      |
 |     ActorWorker receives (prompts, completions, rewards)            |
-|     Computes GRPO loss and updates model weights                    |
+|     Computes RL loss and updates model weights                      |
 |                    |                                                |
 |                    v                                                |
 |  5. SYNC WEIGHTS (Every N steps)                                    |
@@ -238,9 +238,9 @@ All MRLTrainer parameters are available as CLI args via `modal run MRL/train.py:
 +---------------------------------------------------------------------+
 ```
 
-### GRPO Algorithm
+### Default Algorithm: GRPO
 
-GRPO generates multiple completions per prompt and computes relative advantages within each group:
+The default training algorithm is GRPO (Group Relative Policy Optimization), which generates multiple completions per prompt and computes relative advantages within each group:
 
 1. Generate `num_generations` completions per prompt
 2. Score each with the reward function
@@ -248,6 +248,8 @@ GRPO generates multiple completions per prompt and computes relative advantages 
 4. Update policy to increase probability of higher-reward completions
 
 Supported loss variants: `dapo`, `grpo`, `dr_grpo`, `bnpo`, `cispo`, `sapo`
+
+Other TRL-supported algorithms (PPO, DPO, etc.) can be integrated by swapping the ActorWorker's training logic.
 
 ## File Structure
 
@@ -261,7 +263,7 @@ MRL/
 +-- trainer.py           # MRLTrainer facade (programmatic API)
 +-- train.py             # CLI entry point (modal run)
 +-- workers/
-    +-- actor.py         # ActorWorker - GRPO loss, weight management, checkpointing
+    +-- actor.py         # ActorWorker - RL training, weight management, checkpointing
     +-- rollout.py       # RolloutWorker - vLLM generation, weight sync
     +-- reward.py        # Sandbox-based code execution rewards
 ```

@@ -1,7 +1,7 @@
 """Test MRLTrainer with a custom reward function (local orchestrator path).
 
 Usage:
-    python -m MRL.tests.test_trainer
+    python tests/test_trainer.py
 """
 
 from MRL.trainer import MRLTrainer

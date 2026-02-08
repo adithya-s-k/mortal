@@ -54,6 +54,9 @@ checkpoints/
 *.log
 logs/
 
+# uv
+uv.lock
+
 # OS
 .DS_Store
 Thumbs.db
