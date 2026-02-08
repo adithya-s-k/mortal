@@ -1,38 +1,50 @@
 # MORTAL
 
-(M)odal (O)rchestrated (R)einforcement (T)raining (A)rchitecture for (L)LMs
+**M**odal **O**rchestrated **R**einforcement **T**raining **A**rchitecture for **L**LMs
 
-A serverless reinforcement learning framework for LLMs on [Modal](https://modal.com). Built on [TRL](https://github.com/huggingface/trl) and vLLM, MORTAL supports any RL algorithm available in TRL (GRPO, PPO, DPO, etc.) with pluggable reward environments, configurable GPU allocation, and a simple programmatic API. Currently ships with GRPO as the default training algorithm.
+A serverless reinforcement learning framework for LLMs on [Modal](https://modal.com). Built on [TRL](https://github.com/huggingface/trl) and [vLLM](https://docs.vllm.ai), MORTAL lets you write reward functions exactly like TRL's `GRPOTrainer`, then turbocharge training with Modal's cloud GPUs. Pluggable reward environments, configurable execution modes, and a simple programmatic API.
 
-## Architecture
+---
+
+## Overview
 
 ```
-User's Machine (CPU)                    Modal Cloud
-+---------------------+      +------------------------------+
-|                     |      |                              |
-|  MortalTrainer         |      |  ActorWorker (GPU)           |
-|  +- config          |----->|  +- RL training step         |
-|  +- reward_funcs    |      |  +- weight sync              |
-|  +- train()         |      |  +- checkpoint               |
-|       |             |      |                              |
-|  Orchestrator       |      |  RolloutWorker(s) (GPU)      |
-|  (local or Modal)   |----->|  +- vLLM generation          |
-|       |             |      |  +- logprob computation      |
-|                     |      |                              |
-|  RewardEnvironment  |      |  Sandbox / Function          |
-|  (local scoring     |----->|  +- code execution           |
-|   + remote exec)    |      |  +- custom images            |
-|                     |      |                              |
-+---------------------+      +------------------------------+
+                           ┌─────────────────────────────────────────────────────┐
+                           │                  Modal Cloud                        │
+                           │                                                     │
+┌──────────────┐           │  ┌─────────────────────────────────────────────┐    │
+│              │           │  │         SingleNode Mode                     │    │
+│  Your Code   │           │  │  ┌─────────────┐  ┌──────────────────┐     │    │
+│              │           │  │  │ TRL GRPO     │  │ vLLM (optional)  │     │    │
+│  from mortal │  ────────>│  │  │ Trainer      │  │ colocate / serve │     │    │
+│  import ...  │           │  │  └─────────────┘  └──────────────────┘     │    │
+│              │           │  └─────────────────────────────────────────────┘    │
+│  trainer =   │           │                       OR                            │
+│  MortalTrain │           │  ┌─────────────────────────────────────────────┐    │
+│  er(...)     │           │  │       Distributed Mode (veRL-style)         │    │
+│              │           │  │                                             │    │
+│  trainer     │  ────────>│  │  Orchestrator ──> ActorWorker (A100)        │    │
+│  .train()    │           │  │       │           ├─ Train step             │    │
+│              │           │  │       │           ├─ Weight sync            │    │
+└──────────────┘           │  │       │           └─ Checkpoint             │    │
+                           │  │       │                                     │    │
+                           │  │       └────────> RolloutWorker(s) (A10G)    │    │
+                           │  │                  ├─ vLLM generation         │    │
+                           │  │                  └─ Logprob computation     │    │
+                           │  └─────────────────────────────────────────────┘    │
+                           │                                                     │
+                           │  ┌─────────────────────────────────────────────┐    │
+                           │  │           Reward Execution                  │    │
+                           │  │  ┌──────────┐  ┌───────────┐  ┌─────────┐  │    │
+                           │  │  │ Sandbox  │  │ Function  │  │ Custom  │  │    │
+                           │  │  │ (isolated│  │ (pre-warm │  │ Callable│  │    │
+                           │  │  │  per-call│  │  fast)    │  │         │  │    │
+                           │  │  └──────────┘  └───────────┘  └─────────┘  │    │
+                           │  └─────────────────────────────────────────────┘    │
+                           └─────────────────────────────────────────────────────┘
 ```
 
-- **ActorWorker**: RL training step on GPU (A100 by default, configurable)
-- **RolloutWorker**: vLLM inference on GPU (A10G by default, configurable)
-- **Reward**: Custom `RewardEnvironment`, plain callables, or built-in sandbox mode
-
-**Two orchestration modes:**
-- `reward_funcs=None/"sandbox"` -- orchestrator + rewards run on Modal
-- `reward_funcs=callable/RewardEnvironment` -- orchestrator runs locally, GPU work on Modal
+---
 
 ## Quick Start
 
@@ -44,108 +56,276 @@ modal setup  # authenticate
 modal volume create grpo-trl-storage  # one-time
 ```
 
-### Usage
-
-#### Sandbox Rewards (code execution)
+### Minimal Example
 
 ```python
-from mortal import MortalTrainer
+from mortal import MortalTrainer, SingleNode
 
 trainer = MortalTrainer(
     model="Qwen/Qwen2.5-0.5B-Instruct",
-    reward_funcs="sandbox",  # or None
+    mode=SingleNode(gpu="A100"),
     max_steps=5,
-    actor_gpu="A100",
 )
 trainer.train()
 ```
 
-#### Custom Reward Function
+### GSM8K Example (full end-to-end)
+
+See [`examples/gsm8k_grpo.py`](examples/gsm8k_grpo.py) -- a complete example that teaches a model to solve math problems by generating and executing Python code. Demonstrates custom `RewardEnvironment`, multiple reward functions, and all execution modes.
+
+```bash
+# Single GPU, no vLLM (simplest)
+python examples/gsm8k_grpo.py --mode single_node
+
+# Single GPU with vLLM colocated (faster generation)
+python examples/gsm8k_grpo.py --mode single_node_vllm_colocate
+
+# 2x GPU with vLLM on dedicated GPU
+python examples/gsm8k_grpo.py --mode single_node_vllm_serve
+
+# Distributed (separate actor + rollout workers)
+python examples/gsm8k_grpo.py --mode distributed
+
+# With custom settings
+python examples/gsm8k_grpo.py --mode single_node --model Qwen/Qwen3-0.6B \
+    --max_steps 100 --batch_size 4 --num_generations 4
+```
+
+---
+
+## Execution Modes
+
+### SingleNode
+
+Everything runs in **one Modal container**. TRL's `GRPOTrainer` handles the training loop natively. Simplest to use, great for small-to-medium models.
+
+```
+┌───────────────────────────────────────────────┐
+│              Single Container (GPU)            │
+│                                               │
+│   ┌───────────────┐    ┌──────────────────┐   │
+│   │  TRL GRPO     │    │  vLLM (optional) │   │
+│   │  Trainer      │◄──►│  generation      │   │
+│   │  + training   │    │  + logprobs      │   │
+│   └───────┬───────┘    └──────────────────┘   │
+│           │                                   │
+│           ▼                                   │
+│   ┌───────────────┐                           │
+│   │  Reward Funcs │ ──► Sandbox / Function    │
+│   └───────────────┘                           │
+└───────────────────────────────────────────────┘
+```
 
 ```python
-from mortal import MortalTrainer
-from datasets import load_dataset
+from mortal import MortalTrainer, SingleNode, GPUConfig
 
-dataset = load_dataset("my_dataset", split="train")
-# dataset must have a "prompt" column
-# all other columns are passed as kwargs to the reward function
+# Basic -- no vLLM
+trainer = MortalTrainer(mode=SingleNode(gpu="A100"), ...)
 
-def accuracy_reward(completions, ground_truths, **kwargs):
-    return [1.0 if c.strip() == gt.strip() else 0.0
-            for c, gt in zip(completions, ground_truths)]
+# vLLM colocated on same GPU (faster generation)
+trainer = MortalTrainer(mode=SingleNode(gpu="A100", use_vllm=True, vllm_mode="colocate"), ...)
 
+# vLLM on separate GPU (requires 2+ GPUs)
 trainer = MortalTrainer(
-    model="Qwen/Qwen2.5-0.5B-Instruct",
-    reward_funcs=accuracy_reward,
-    train_dataset=dataset,
-    num_generations=4,
-    max_steps=10,
+    mode=SingleNode(gpu=GPUConfig("A100", count=2), use_vllm=True, vllm_mode="serve"),
+    ...
 )
-trainer.train()
 ```
 
-#### Multiple Reward Functions with Weights
+### Distributed
+
+veRL-style orchestration with **separate workers** for training and generation. Supports horizontal scaling of rollout workers and heterogeneous GPUs.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     Orchestrator (Modal)                      │
+│                                                              │
+│   ┌──────────────────┐       ┌───────────────────────────┐   │
+│   │  ActorWorker     │       │  RolloutWorker(s)         │   │
+│   │  (A100)          │       │  (A10G x N)               │   │
+│   │                  │       │                           │   │
+│   │  ├─ Train step   │  ◄──  │  ├─ vLLM generation      │   │
+│   │  ├─ Loss compute │  ──►  │  ├─ Logprob computation  │   │
+│   │  ├─ Weight sync ─┼──────►│  └─ Weight reload        │   │
+│   │  └─ Checkpoint   │       │                           │   │
+│   └──────────────────┘       └───────────────────────────┘   │
+│             │                                                │
+│             ▼                                                │
+│   ┌──────────────────┐                                       │
+│   │  Reward Layer    │ ──► Sandbox / Function / Callable     │
+│   └──────────────────┘                                       │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ```python
-def format_reward(completions, **kwargs):
-    return [1.0 if "```" in c else 0.0 for c in completions]
-
-def length_reward(completions, **kwargs):
-    return [min(len(c) / 500, 1.0) for c in completions]
+from mortal import MortalTrainer, Distributed
 
 trainer = MortalTrainer(
-    model="Qwen/Qwen2.5-0.5B-Instruct",
-    reward_funcs=[format_reward, length_reward],
-    reward_weights=[0.7, 0.3],  # optional, defaults to equal weights
-    train_dataset=dataset,
+    mode=Distributed(actor="A100", rollout="A10G", num_rollout_workers=2),
+    ...
 )
-trainer.train()
 ```
+
+Both modes support custom reward functions, custom datasets, and `detach=True` for fire-and-forget training.
+
+---
+
+## Training Loop
+
+```
+    ┌─────────────────┐
+    │  1. GET BATCH    │  Fetch prompts from dataset
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │  2. GENERATE     │  Fan out across RolloutWorker(s) with vLLM
+    │                  │  (or TRL's built-in generation in SingleNode)
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │  3. REWARD       │  Score completions via reward_funcs
+    │                  │  (sandbox / function / callable / RewardEnvironment)
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │  4. TRAIN STEP   │  GRPO loss computation + weight update
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │  5. SYNC WEIGHTS │  Push updated weights to RolloutWorker(s)
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │  6. REPEAT       │  Until max_steps reached
+    └─────────────────┘
+```
+
+**GRPO** (Group Relative Policy Optimization) generates multiple completions per prompt, scores them, normalizes rewards within each group, and updates the policy to favor higher-reward completions.
+
+Supported loss variants via TRL: `grpo`, `dapo`, `dr_grpo`, `bnpo`, `cispo`, `sapo`
+
+---
 
 ## Reward System
 
-MORTAL provides a pluggable reward system built around the `RewardEnvironment` base class. You can use plain callables for simple cases, or subclass `RewardEnvironment` for structured reward logic with access to remote execution tools.
+MORTAL's reward system is designed to feel identical to TRL. Write reward functions the same way, get remote execution for free.
 
-### Reward Modes
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      Reward Options                          │
+│                                                              │
+│  ┌────────────────┐  ┌────────────────┐  ┌───────────────┐  │
+│  │  Plain         │  │  Reward        │  │  Built-in     │  │
+│  │  Callable      │  │  Environment   │  │  Environments │  │
+│  │                │  │                │  │               │  │
+│  │  def reward(   │  │  class MyEnv(  │  │  CodeExec     │  │
+│  │    completions │  │    Reward      │  │  Environment  │  │
+│  │    **kwargs    │  │    Environment │  │               │  │
+│  │  ):            │  │  ):           │  │  LLMJudge     │  │
+│  │    return [...] │  │    def score  │  │  Environment  │  │
+│  │                │  │    def score  │  │               │  │
+│  │                │  │      _batch   │  │               │  │
+│  └────────────────┘  └───────┬────────┘  └───────────────┘  │
+│                              │                               │
+│                    ┌─────────┴──────────┐                    │
+│                    │  Remote Execution  │                    │
+│                    │                    │                    │
+│                    │  execute_in_       │                    │
+│                    │  ├─ sandbox()      │                    │
+│                    │  └─ function()     │                    │
+│                    │                    │                    │
+│                    │  execute_batch_in_ │                    │
+│                    │  ├─ sandbox()      │                    │
+│                    │  └─ function()     │                    │
+│                    └───────────────────┘                    │
+└──────────────────────────────────────────────────────────────┘
+```
 
-| Mode | `reward_funcs=` | Where it runs | Use case |
-|------|-----------------|---------------|----------|
-| Sandbox | `None` or `"sandbox"` | Modal Sandbox | Code execution with test cases |
-| Custom callable | `callable` | Local CPU | Any simple reward logic |
-| RewardEnvironment | `RewardEnvironment` subclass | Local + remote exec | Structured rewards with sandbox/function access |
-| Mixed | `[env, callable, ...]` | Mixed | Multiple rewards, weighted average |
+### Plain Callable (simplest)
 
-### RewardEnvironment Base Class
+Works exactly like TRL's reward functions:
 
-Subclass `RewardEnvironment` to create custom reward environments with a fixed input/output contract and access to two remote execution tools:
+```python
+def format_reward(completions, **kwargs):
+    """completions: list[list[dict]] in TRL chat format."""
+    responses = [c[0]["content"] for c in completions]
+    return [1.0 if "<answer>" in r else 0.0 for r in responses]
 
-- **`execute_in_sandbox(code)`** -- Runs code in an isolated Modal Sandbox. Custom `modal.Image` support. Best for untrusted code.
-- **`execute_in_function(code)`** -- Runs code in a pre-warmed Modal Function (TRAINING_IMAGE with torch/trl/numpy). Faster, no container spin-up.
+trainer = MortalTrainer(
+    reward_funcs=[format_reward],
+    train_dataset=dataset,
+    mode=SingleNode(gpu="A100"),
+)
+```
+
+### RewardEnvironment (structured + remote execution)
+
+Subclass `RewardEnvironment` for structured reward logic with access to Modal's execution infrastructure:
 
 ```python
 from mortal.rewards import RewardEnvironment
 
-class XMLFormatReward(RewardEnvironment):
-    name = "XMLFormat"
+class CodeExecutionReward(RewardEnvironment):
+    name = "CodeExecution"
 
     def score(self, completion: str, prompt: str, **kwargs) -> float:
-        has_think = "<think>" in completion and "</think>" in completion
-        has_answer = "<answer>" in completion and "</answer>" in completion
-        return float(has_think) * 0.5 + float(has_answer) * 0.5
+        code = extract_code(completion)
+        if not code:
+            return 0.0
+        result = self.execute_in_function(code)  # runs on Modal
+        return 1.0 if result.success else 0.0
 
+    def score_batch(self, completions, prompts, **kwargs):
+        codes = [extract_code(c) for c in completions]
+        results = self.execute_batch_in_function(codes)  # parallel on Modal
+        return [1.0 if r.success else 0.0 for r in results]
+```
+
+### Remote Execution Tools
+
+| Method | Container | Speed | Best for |
+|--------|-----------|-------|----------|
+| `execute_in_sandbox()` | Fresh isolated container | Slower (cold start) | Untrusted code |
+| `execute_in_function()` | Pre-warmed TRAINING_IMAGE | Fast (warm container) | Trusted computation |
+| `execute_batch_in_sandbox()` | Parallel sandboxes | Parallel | Batch untrusted code |
+| `execute_batch_in_function()` | Parallel functions | Parallel + fast | Batch trusted code |
+
+### Multiple Rewards with Weights
+
+```python
 trainer = MortalTrainer(
-    reward_funcs=XMLFormatReward(),
+    reward_funcs=[format_reward, CodeExecutionReward(), quality_reward],
+    reward_weights=[0.3, 1.0, 0.2],  # optional, defaults to equal
     train_dataset=dataset,
 )
 ```
 
-#### Using Sandbox Execution (custom image)
+### Built-in Environments
+
+```python
+from mortal.rewards.examples import CodeExecutionEnvironment, LLMJudgeEnvironment
+
+# Code execution with test cases (sandbox-based)
+env = CodeExecutionEnvironment(partial_credit=True)
+
+# LLM-as-judge (uses OpenAI-compatible API)
+judge = LLMJudgeEnvironment(model="gpt-4o-mini", score_range=(0, 10))
+
+trainer = MortalTrainer(reward_funcs=[env, judge], train_dataset=ds)
+```
+
+### Custom Sandbox Image
 
 ```python
 import modal
 from mortal.rewards import RewardEnvironment, SandboxConfig
 
-class NumpyTestEnvironment(RewardEnvironment):
+class NumpyTestEnv(RewardEnvironment):
     name = "NumpyTest"
     sandbox_config = SandboxConfig(
         image=modal.Image.debian_slim().pip_install("numpy", "scipy"),
@@ -153,251 +333,148 @@ class NumpyTestEnvironment(RewardEnvironment):
     )
 
     def score(self, completion: str, prompt: str, **kwargs) -> float:
-        code = self._extract(completion)
-        tests = kwargs.get("testcases", [])
-        full_code = f"{code}\n\n" + "\n".join(tests)
-        result = self.execute_in_sandbox(full_code)
+        result = self.execute_in_sandbox(extract_code(completion))
         return 1.0 if result.success else 0.0
 ```
 
-#### Using Function Execution (pre-warmed, fast)
-
-```python
-from mortal.rewards import RewardEnvironment
-
-class FastCodeCheck(RewardEnvironment):
-    name = "FastCodeCheck"
-
-    def score(self, completion: str, prompt: str, **kwargs) -> float:
-        # Runs on TRAINING_IMAGE (has torch, numpy, transformers)
-        result = self.execute_in_function(f"import torch; print(torch.__version__)")
-        return 1.0 if result.success else 0.0
-```
-
-#### Batch Scoring
-
-Override `score_batch()` for parallel execution:
-
-```python
-def score_batch(self, completions, prompts, **kwargs):
-    codes = [self.build_code(c, kwargs["testcases"][i]) for i, c in enumerate(completions)]
-    results = self.execute_batch_in_sandbox(codes)  # parallel sandboxes
-    return [1.0 if r.success else 0.0 for r in results]
-```
-
-### Example Environments
-
-MORTAL ships with ready-to-use environments in `mortal.rewards.examples`:
-
-#### CodeExecutionEnvironment
-
-Extracts code from completions, runs with test cases in Modal Sandboxes.
-
-```python
-from mortal.rewards.examples import CodeExecutionEnvironment
-from mortal.rewards import SandboxConfig
-import modal
-
-# Default (binary pass/fail)
-env = CodeExecutionEnvironment()
-
-# With partial credit and custom image
-env = CodeExecutionEnvironment(
-    partial_credit=True,
-    sandbox_cfg=SandboxConfig(
-        image=modal.Image.debian_slim().pip_install("numpy", "pandas"),
-        timeout=60,
-    ),
-)
-
-trainer = MortalTrainer(reward_funcs=env, train_dataset=ds)
-```
-
-#### LLMJudgeEnvironment
-
-Uses an OpenAI-compatible API to score completions with an LLM.
-
-```python
-from mortal.rewards.examples import LLMJudgeEnvironment
-
-judge = LLMJudgeEnvironment(
-    model="gpt-4o-mini",
-    system_prompt="You are a code quality expert.",
-    judging_template="Rate this solution 0-10.\n\nProblem: {prompt}\nSolution: {completion}",
-    score_range=(0, 10),
-)
-
-trainer = MortalTrainer(reward_funcs=judge, train_dataset=ds)
-```
-
-### Plain Callable (simplest)
-
-```python
-def my_reward(completions, ground_truths, metadata, **kwargs):
-    # completions: list[str] - model outputs
-    # ground_truths, metadata: from dataset columns
-    return [float_score_per_completion]
-```
+---
 
 ## Configuration
 
-### MortalTrainer Parameters
+### MortalTrainer
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `model` | `Qwen/Qwen2.5-0.5B-Instruct` | HuggingFace model name |
-| `reward_funcs` | `None` | Reward function(s), RewardEnvironment(s), or `"sandbox"` |
+| `model` | `"Qwen/Qwen2.5-0.5B-Instruct"` | HuggingFace model name |
+| `mode` | `Distributed()` | `SingleNode(...)` or `Distributed(...)` |
+| `reward_funcs` | `None` | Reward function(s), `RewardEnvironment`(s), or `"sandbox"` |
 | `reward_weights` | `None` | Weights for combining multiple rewards |
-| `train_dataset` | `None` | HuggingFace Dataset (required for custom rewards) |
-| `actor_gpu` | `A100` | GPU for training worker |
-| `rollout_gpu` | `A10G` | GPU for vLLM rollout workers |
-| `num_rollout_workers` | `2` | Number of parallel rollout workers |
-| `num_generations` | `4` | Generations per prompt |
+| `train_dataset` | `None` | HuggingFace Dataset with `prompt` column |
+| `num_generations` | `4` | Completions per prompt (GRPO group size) |
 | `batch_size` | `8` | Prompts per training step |
 | `learning_rate` | `5e-6` | Learning rate |
-| `max_steps` | `-1` | Max training steps (-1 = use epochs) |
+| `max_steps` | `-1` | Max training steps (`-1` = use epochs) |
 | `num_epochs` | `5` | Number of training epochs |
-| `loss_type` | `dapo` | Loss variant (grpo/dapo/dr_grpo/bnpo/cispo/sapo) |
-| `weight_sync_method` | `reload` | How to sync weights (reload/volume/direct/checkpoint) |
-| `use_lora` | `False` | Enable LoRA training |
+| `loss_type` | `"dapo"` | `grpo` / `dapo` / `dr_grpo` / `bnpo` / `cispo` / `sapo` |
 | `beta` | `0.0` | KL penalty coefficient |
 | `epsilon` | `0.2` | PPO-style clipping epsilon |
-| `scale_rewards` | `group` | Reward scaling (group/batch/none) |
+| `scale_rewards` | `"group"` | Reward scaling: `group` / `batch` / `none` |
+| `max_completion_length` | `1024` | Max completion length for training |
 | `max_tokens` | `8000` | Max tokens per generated completion |
 | `max_model_len` | `16384` | Max model context length |
-| `max_completion_length` | `1024` | Max completion length for training |
+| `use_lora` | `False` | Enable LoRA training |
+| `gradient_checkpointing` | `True` | Reduces memory via activation recomputation |
+
+### SingleNode Options
+
+```python
+SingleNode(gpu="A100", use_vllm=False, vllm_mode="colocate")
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `gpu` | `"A100"` | GPU type (string or `GPUConfig("A100", count=2)`) |
+| `use_vllm` | `False` | Use vLLM for faster generation |
+| `vllm_mode` | `"colocate"` | `"colocate"` (shared GPU) or `"serve"` (separate GPU, needs 2+) |
+
+### Distributed Options
+
+```python
+Distributed(actor="A100", rollout="A10G", num_rollout_workers=2)
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `actor` | `"A100"` | GPU for actor (training) worker |
+| `rollout` | `"A10G"` | GPU for rollout (generation) workers |
+| `num_rollout_workers` | `2` | Number of parallel rollout workers |
+| `weight_sync_method` | `"reload"` | How to sync weights (see below) |
+| `sync_weights_every` | `1` | Sync frequency (every N steps) |
 
 ### Weight Sync Methods
 
-| Method | Speed | Description |
-|--------|-------|-------------|
-| `reload` (default) | Fast (~2-3s) | vLLM v1 sleep/wake_up/reload_weights pattern |
-| `volume` | Medium (~10-20s) | Save to shared volume, workers reload |
-| `direct` | Fast | In-memory transfer via vLLM load_weights (WIP) |
-| `checkpoint` | Slow (~30-40s) | Full checkpoint save + model recreation |
-
-## How It Works
-
-### Training Loop
-
 ```
-+---------------------------------------------------------------------+
-|                        TRAINING LOOP                                |
-+---------------------------------------------------------------------+
-|                                                                     |
-|  1. GET BATCH                                                       |
-|     Orchestrator fetches batch of prompts from dataset              |
-|                          |                                          |
-|                          v                                          |
-|  2. GENERATE COMPLETIONS (Parallel)                                 |
-|     Fan out across RolloutWorkers (vLLM inference + logprobs)       |
-|     +-------------+ +-------------+                                 |
-|     |RolloutWorker| |RolloutWorker|                                 |
-|     +------+------+ +------+------+                                 |
-|            +-------+-------+                                        |
-|                    v                                                |
-|  3. COMPUTE REWARDS                                                 |
-|     RewardEnvironment.score_batch() or callable                     |
-|     Can use sandbox/function execution for remote code runs         |
-|                    |                                                |
-|                    v                                                |
-|  4. TRAIN STEP                                                      |
-|     ActorWorker: RL loss computation + weight update                |
-|                    |                                                |
-|                    v                                                |
-|  5. SYNC WEIGHTS (Every N steps)                                    |
-|     Actor -> RolloutWorkers via reload/volume/checkpoint            |
-|                    |                                                |
-|                    v                                                |
-|  6. REPEAT until max_steps reached                                  |
-|                                                                     |
-+---------------------------------------------------------------------+
+                    Speed           How it works
+                    ─────           ────────────
+  reload (default)  ~2-3s           vLLM v1 sleep/wake_up/reload_weights
+  volume            ~10-20s         Save to shared Modal volume, workers reload
+  direct            ~2-3s           In-memory transfer via vLLM load_weights
+  checkpoint        ~30-40s         Full checkpoint save + model recreation
 ```
 
-### Default Algorithm: GRPO
-
-GRPO (Group Relative Policy Optimization) generates multiple completions per prompt and computes relative advantages within each group:
-
-1. Generate `num_generations` completions per prompt
-2. Score each with the reward function
-3. Normalize rewards within each group (zero-mean, unit-variance)
-4. Update policy to increase probability of higher-reward completions
-
-Supported loss variants: `dapo`, `grpo`, `dr_grpo`, `bnpo`, `cispo`, `sapo`
+---
 
 ## File Structure
 
 ```
 mortal/
-+-- __init__.py          # Package exports
-+-- app.py               # Modal app, images, volume
-+-- config.py            # OrchestratorConfig, ModelConfig, TrainingConfig, GenerationConfig
-+-- orchestrator.py      # train() [Modal], train_local() [local], training loop
-+-- trainer.py           # MortalTrainer (programmatic API)
-+-- rewards/
-|   +-- __init__.py      # Core exports (RewardEnvironment, SandboxConfig, etc.)
-|   +-- base.py          # RewardEnvironment, SandboxConfig, FunctionConfig, ExecutionResult
-|   +-- dispatch.py      # compute_rewards() dispatch layer
-|   +-- sandbox_executor.py  # Modal Sandbox execution
-|   +-- function_executor.py # Modal Function execution (TRAINING_IMAGE)
-|   +-- utils.py         # Code extraction helpers
-|   +-- examples/
-|       +-- code_execution.py  # CodeExecutionEnvironment
-|       +-- llm_judge.py       # LLMJudgeEnvironment
-+-- workers/
-    +-- actor.py         # ActorWorker - RL training, weight management
-    +-- rollout.py       # RolloutWorker - vLLM generation, weight sync
+├── __init__.py              # Exports: MortalTrainer, SingleNode, Distributed, GPUConfig
+├── app.py                   # Modal app, images (TRAINING_IMAGE, VLLM_IMAGE), volume
+├── config.py                # OrchestratorConfig, SingleNode, Distributed, GPUConfig
+├── orchestrator.py          # train() [Modal], train_local(), SingleNodeTrainer
+├── trainer.py               # MortalTrainer — programmatic entry point
+├── rewards/
+│   ├── __init__.py          # Exports: RewardEnvironment, SandboxConfig, FunctionConfig
+│   ├── base.py              # RewardEnvironment ABC, SandboxConfig, FunctionConfig
+│   ├── dispatch.py          # compute_rewards() — routes to correct backend
+│   ├── sandbox_executor.py  # Modal Sandbox execution (isolated containers)
+│   ├── function_executor.py # Modal Function execution (pre-warmed TRAINING_IMAGE)
+│   ├── utils.py             # Code extraction helpers
+│   └── examples/
+│       ├── code_execution.py    # CodeExecutionEnvironment
+│       └── llm_judge.py         # LLMJudgeEnvironment
+└── workers/
+    ├── actor.py             # ActorWorker — RL training, weight management
+    ├── rollout.py           # RolloutWorker — vLLM generation, weight sync
+    └── reward.py            # Legacy reward helpers
+
+examples/
+└── gsm8k_grpo.py            # GSM8K math training — all 4 modes
 ```
+
+---
 
 ## Testing
 
 ```bash
-# Unit tests (reward environments only, no GPU)
+# Unit tests (reward environments only, no GPU needed)
 python tests/test_trainer.py --unit-only
 
-# Training tests (full loop with GPU workers)
+# Training tests (full loop with Modal GPU workers)
 python tests/test_trainer.py --train-only
 
 # All tests
 python tests/test_trainer.py
 ```
 
-## Volume Management
-
-```bash
-# List checkpoints
-modal volume ls grpo-trl-storage checkpoints/
-
-# Clear model cache (if corrupted)
-modal volume rm grpo-trl-storage model_cache/Qwen_Qwen2-0.5B-Instruct
-```
+---
 
 ## Monitoring
 
-- **Modal Dashboard**: https://modal.com/apps -- logs, costs, GPU usage
-- **Weights & Biases**: metrics logged to project `modal-grpo-trl`
+| Tool | What it shows |
+|------|---------------|
+| **[Modal Dashboard](https://modal.com/apps)** | Function calls, sandboxes, logs, GPU usage, costs |
+| **Weights & Biases** | Training metrics: loss, reward, KL divergence, clip fraction |
+
+---
 
 ## Troubleshooting
 
-### Out of Memory
-- Reduce `batch_size`, `max_model_len`, or `num_generations`
-- Use a smaller model or enable LoRA (`use_lora=True`)
+| Problem | Solution |
+|---------|----------|
+| **Out of Memory** | Reduce `batch_size`, `max_completion_length`, or `num_generations`. Enable LoRA (`use_lora=True`). |
+| **Rewards all zero** | Check `max_completion_length` -- if too small, completions get clipped before useful output. Qwen3 models use `<think>` blocks that consume tokens. Set to 2048+. |
+| **Slow generation** | Increase `num_rollout_workers`. Enable vLLM in SingleNode. Reduce `max_tokens`. |
+| **Weight sync fails** | Default `reload` requires vLLM v1 (>= 0.8.0). Fall back to `weight_sync_method="volume"`. |
+| **Sandboxes not on dashboard** | Sandboxes spawned inside containers may not appear. Use `execute_in_function()` instead -- always visible as function calls. |
+| **Function not hydrated** | Import `mortal.rewards.function_executor` before `app.run()` so Modal discovers the function. |
 
-### Slow Generation
-- Increase `num_rollout_workers` for more parallelism
-- Reduce `max_tokens` for shorter completions
-
-### Weight Sync Issues
-- Default `reload` method requires vLLM v1 (>= 0.8.0)
-- Fall back to `volume` or `checkpoint` if reload fails
-
-### Function Not Hydrated
-- If using `execute_in_function()` from a custom script, import `mortal.rewards.function_executor` before `app.run()` so Modal discovers the function.
+---
 
 ## References
 
-- [GRPO Paper (DeepSeek)](https://arxiv.org/abs/2402.03300)
-- [TRL Documentation](https://huggingface.co/docs/trl)
-- [vLLM Documentation](https://docs.vllm.ai)
-- [Modal Documentation](https://modal.com/docs)
-- [veRL](https://github.com/volcengine/verl) - Architecture inspiration
+- [GRPO Paper (DeepSeek)](https://arxiv.org/abs/2402.03300) -- Group Relative Policy Optimization
+- [TRL Documentation](https://huggingface.co/docs/trl) -- Training framework
+- [vLLM Documentation](https://docs.vllm.ai) -- Fast inference engine
+- [Modal Documentation](https://modal.com/docs) -- Serverless GPU platform
+- [veRL](https://github.com/volcengine/verl) -- Architecture inspiration
