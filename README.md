@@ -168,6 +168,76 @@ trainer = MortalTrainer(
 
 Both modes support custom reward functions, custom datasets, and `detach=True` for fire-and-forget training.
 
+### Async Distributed (Alpha)
+
+> **Status: Alpha** — functional but still being hardened. API may change.
+
+Async mode overlaps generation and training for higher GPU utilization. Two strategies available:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  Pipeline Mode (1-step stale)                     │
+│                                                                   │
+│  Step N:   [===== Generate N =====][=== Train N ===]              │
+│  Step N+1:                          [==== Generate N+1 ====]      │
+│                                     ↑ overlapped                  │
+│                                                                   │
+│  • Simple, predictable staleness (max 1 step)                     │
+│  • ~85% overlap ratio in practice                                 │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                  Queue Mode (producer-consumer)                   │
+│                                                                   │
+│  Producer:  [Gen 0][Gen 1][Gen 2][Gen 3]...  → modal.Queue        │
+│  Consumer:  ........[Train 0][Train 1][Train 2]...  ← modal.Queue │
+│                                                                   │
+│  • Fully decoupled via modal.Queue (ephemeral)                    │
+│  • Configurable staleness threshold + automatic stale drops       │
+│  • Higher throughput, multi-step staleness                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from mortal import MortalTrainer, Distributed, AsyncConfig
+
+# Pipeline: overlap gen N+1 with train N
+trainer = MortalTrainer(
+    mode=Distributed(
+        actor="A100", rollout="A10G",
+        async_config=AsyncConfig(enabled=True, mode="pipeline"),
+    ),
+    ...
+)
+
+# Queue: fully decoupled producer-consumer
+trainer = MortalTrainer(
+    mode=Distributed(
+        actor="A100", rollout="A10G",
+        async_config=AsyncConfig(enabled=True, mode="queue", queue_size=2),
+    ),
+    ...
+)
+```
+
+```bash
+# GSM8K with async pipeline
+python examples/gsm8k_grpo.py --mode distributed --async_mode pipeline
+
+# GSM8K with async queue
+python examples/gsm8k_grpo.py --mode distributed --async_mode queue
+```
+
+#### AsyncConfig
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enabled` | `False` | Enable async training |
+| `mode` | `"pipeline"` | `"pipeline"` or `"queue"` |
+| `staleness_threshold` | `1` | Max allowed policy staleness (queue mode drops stale batches) |
+| `sync_every` | `1` | Sync weights every N steps |
+| `queue_size` | `2` | Max batches buffered in queue (queue mode) |
+
 ---
 
 ## Training Loop
@@ -408,7 +478,7 @@ Distributed(actor="A100", rollout="A10G", num_rollout_workers=2)
 
 ```
 mortal/
-├── __init__.py              # Exports: MortalTrainer, SingleNode, Distributed, GPUConfig
+├── __init__.py              # Exports: MortalTrainer, SingleNode, Distributed, GPUConfig, AsyncConfig
 ├── app.py                   # Modal app, images (TRAINING_IMAGE, VLLM_IMAGE), volume
 ├── config.py                # OrchestratorConfig, SingleNode, Distributed, GPUConfig
 ├── orchestrator.py          # train() [Modal], train_local(), SingleNodeTrainer

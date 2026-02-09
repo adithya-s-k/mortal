@@ -52,7 +52,9 @@ class RolloutWorker:
         self._current_sync_id = None
         # Local model path for efficient reload_weights
         self._local_model_path = None
-        print("RolloutWorker container started (lazy vLLM init, v1 engine enabled)")
+        self._container_id = id(self)
+        print(f"RolloutWorker container started (lazy vLLM init, v1 engine enabled), "
+              f"container_id={self._container_id}")
 
     def _load_model(
         self,
@@ -116,6 +118,9 @@ class RolloutWorker:
         """
         from vllm import SamplingParams
 
+        print(f"[RolloutWorker.generate] id(self)={id(self)}, "
+              f"_local_model_path={self._local_model_path}, "
+              f"model_path={model_path}, n_prompts={len(prompts)}")
         self._load_model(model_path, max_model_len=max_model_len)
 
         sampling_params = SamplingParams(
@@ -281,7 +286,7 @@ class RolloutWorker:
         self._local_model_path = local_path
         self._cached_base_model = base_model
 
-        print(f"Model initialized for weight sync at {local_path}")
+        print(f"Model initialized for weight sync at {local_path}, id(self)={id(self)}")
         return local_path
 
     @modal.method()
@@ -305,21 +310,18 @@ class RolloutWorker:
         import os
         import time
 
+        print(f"[RolloutWorker.update_weights_from_volume] called with weights_path={weights_path}")
+        print(f"  self.llm={self.llm is not None}, self._local_model_path={self._local_model_path}")
+        print(f"  self.current_model_path={self.current_model_path}, id(self)={id(self)}")
+
         if self.llm is None or self._local_model_path is None:
-            print("Error: Model not initialized. Call initialize_for_weight_sync first.")
+            print(f"Error: Model not initialized. Call initialize_for_weight_sync first.")
+            print(f"  DEBUG: This likely means Modal routed this call to a NEW container replica.")
+            print(f"  DEBUG: The original container (with initialized model) may be busy with generate().")
             return False
 
         start_time = time.time()
         model_path = weights_path or self._local_model_path
-
-        # Ensure we have the latest weights from volume
-        volume.reload()
-
-        # Check weights file exists
-        weights_file = f"{model_path}/model.safetensors"
-        if not os.path.exists(weights_file):
-            print(f"Error: Weights file not found at {weights_file}")
-            return False
 
         print(f"Updating weights via reload_weights (no model recreation)...")
 
@@ -328,8 +330,18 @@ class RolloutWorker:
                 # v1 engine: use sleep/wake_up for efficient memory management
                 print("  Using vLLM v1 sleep/wake_up pattern...")
 
-                # Sleep to free GPU memory (level=2: discard weights and KV cache)
+                # Sleep FIRST to release file handles, then reload volume
                 self.llm.sleep(level=2)
+
+                # Now volume.reload() won't fail with "open files"
+                volume.reload()
+
+                # Check weights file exists
+                weights_file = f"{model_path}/model.safetensors"
+                if not os.path.exists(weights_file):
+                    print(f"Error: Weights file not found at {weights_file}")
+                    self.llm.wake_up()
+                    return False
 
                 # Reallocate weights memory only (avoid OOM)
                 self.llm.wake_up(tags=["weights"])
@@ -350,6 +362,7 @@ class RolloutWorker:
                 del self.llm
                 self.llm = None
                 torch.cuda.empty_cache()
+                volume.reload()
                 self._load_model(model_path)
                 elapsed = time.time() - start_time
                 print(f"  Weights updated in {elapsed:.2f}s (full reload)")

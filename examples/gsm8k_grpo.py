@@ -30,7 +30,7 @@ import re
 
 from datasets import load_dataset
 
-from mortal import MortalTrainer, SingleNode, Distributed, GPUConfig
+from mortal import MortalTrainer, SingleNode, Distributed, GPUConfig, AsyncConfig
 from mortal.rewards.base import RewardEnvironment, FunctionConfig
 
 
@@ -368,6 +368,12 @@ def main():
     parser.add_argument("--num_generations", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument(
+        "--async_mode",
+        choices=["off", "pipeline", "queue"],
+        default="off",
+        help="Async training mode: off (sync), pipeline (1-step stale), queue (multi-step)",
+    )
+    parser.add_argument(
         "--detach",
         action="store_true",
         help="Fire and forget (training continues after terminal closes)",
@@ -376,7 +382,15 @@ def main():
 
     # Build mode
     mode = MODES[args.mode]()
-    print(f"Mode: {args.mode} → {mode}")
+
+    # Apply async config if requested
+    if args.async_mode != "off" and isinstance(mode, Distributed):
+        mode.async_config = AsyncConfig(enabled=True, mode=args.async_mode)
+        print(f"Mode: {args.mode} → {mode} (async={args.async_mode})")
+    else:
+        if args.async_mode != "off":
+            print(f"Warning: --async_mode only works with distributed mode, ignoring")
+        print(f"Mode: {args.mode} → {mode}")
 
     # Dataset prep function — runs on Modal container, not locally
     max_samples = args.max_samples
@@ -400,7 +414,7 @@ def main():
         batch_size=args.batch_size,
         num_generations=args.num_generations,
         learning_rate=args.learning_rate,
-        max_completion_length=2048,
+        max_completion_length=1024 if isinstance(mode, Distributed) else 2048,
         loss_type="grpo",
         beta=0.001,
     )

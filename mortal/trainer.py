@@ -1,6 +1,6 @@
 """MortalTrainer - TRL-like programmatic API for MORTAL training."""
 
-from mortal.config import OrchestratorConfig, SingleNode, Distributed, GPUConfig
+from mortal.config import OrchestratorConfig, SingleNode, Distributed, GPUConfig, AsyncConfig
 from mortal.rewards.base import RewardEnvironment
 
 
@@ -206,17 +206,29 @@ class MortalTrainer:
                     return worker.run.remote(**run_kwargs)
 
                 elif isinstance(mode, Distributed):
-                    print("Using remote orchestrator (distributed on Modal)")
                     reward_funcs = self.reward_funcs if self.reward_funcs not in [None, "sandbox"] else None
                     train_ds = self.train_dataset
                     if train_ds is not None and not callable(train_ds):
                         from datasets import Dataset
                         train_ds = Dataset.from_dict(train_ds.to_dict())
+
+                    # Route to sync/pipeline/queue based on async_config
+                    async_cfg = mode.async_config
+                    if async_cfg.enabled and async_cfg.mode == "pipeline":
+                        print("Using async PIPELINE orchestrator (distributed on Modal)")
+                        train_fn = _orch.train_async_pipeline
+                    elif async_cfg.enabled and async_cfg.mode == "queue":
+                        print("Using async QUEUE orchestrator (distributed on Modal)")
+                        train_fn = _orch.train_async_queue
+                    else:
+                        print("Using SYNC orchestrator (distributed on Modal)")
+                        train_fn = _orch.train
+
                     if detach:
-                        _orch.train.spawn(self.config.to_dict(), reward_funcs=reward_funcs, train_dataset=train_ds)
+                        train_fn.spawn(self.config.to_dict(), reward_funcs=reward_funcs, train_dataset=train_ds)
                         print("Training spawned in detached mode. Check Modal dashboard for progress.")
                         return None
-                    return _orch.train.remote(self.config.to_dict(), reward_funcs=reward_funcs, train_dataset=train_ds)
+                    return train_fn.remote(self.config.to_dict(), reward_funcs=reward_funcs, train_dataset=train_ds)
 
                 else:
                     raise ValueError(f"Unknown mode type: {type(mode)}")
