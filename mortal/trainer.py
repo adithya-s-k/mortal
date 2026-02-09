@@ -100,7 +100,8 @@ class MortalTrainer:
                 - callable: custom reward function(completions=..., **kwargs)
                 - list of the above: multiple rewards, weighted average
             reward_weights: Optional list of weights for combining multiple rewards.
-            train_dataset: HuggingFace Dataset with "prompt" column.
+            train_dataset: HuggingFace Dataset with "prompt" column, or a
+                callable that returns one (runs on container, no local loading).
             **kwargs: Additional config overrides.
         """
         self.reward_funcs = reward_funcs
@@ -184,12 +185,13 @@ class MortalTrainer:
                     print(f"Using single-node training (gpu={gpu_spec}, "
                           f"use_vllm={mode.use_vllm}, vllm_mode={mode.vllm_mode})")
                     worker = _orch.SingleNodeTrainer.with_options(gpu=gpu_spec)()
-                    # Pass custom reward_funcs and train_dataset if provided
                     reward_funcs = self.reward_funcs if self.reward_funcs not in [None, "sandbox"] else None
-                    # Convert HF dataset to in-memory format for serialization
-                    # (memory-mapped arrow files reference local paths that don't exist on Modal)
+                    # train_dataset can be:
+                    #   - callable: runs on container (no local data loading)
+                    #   - Dataset: serialize to in-memory for transfer
+                    #   - None: load from config on container
                     train_ds = self.train_dataset
-                    if train_ds is not None:
+                    if train_ds is not None and not callable(train_ds):
                         from datasets import Dataset
                         train_ds = Dataset.from_dict(train_ds.to_dict())
                     run_kwargs = dict(
@@ -206,9 +208,8 @@ class MortalTrainer:
                 elif isinstance(mode, Distributed):
                     print("Using remote orchestrator (distributed on Modal)")
                     reward_funcs = self.reward_funcs if self.reward_funcs not in [None, "sandbox"] else None
-                    # Convert HF dataset for serialization
                     train_ds = self.train_dataset
-                    if train_ds is not None:
+                    if train_ds is not None and not callable(train_ds):
                         from datasets import Dataset
                         train_ds = Dataset.from_dict(train_ds.to_dict())
                     if detach:

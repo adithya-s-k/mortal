@@ -108,7 +108,11 @@ def train(config_dict: Optional[dict] = None, reward_funcs=None, train_dataset=N
 
     # Load dataset
     if train_dataset is not None:
-        dataset = train_dataset
+        if callable(train_dataset):
+            print("Running dataset prep function on container...")
+            dataset = train_dataset()
+        else:
+            dataset = train_dataset
         if config.max_samples:
             dataset = dataset.select(range(min(config.max_samples, len(dataset))))
         print(f"Using provided dataset with {len(dataset)} samples")
@@ -581,7 +585,11 @@ class SingleNodeTrainer:
 
         # Load dataset
         if train_dataset is not None:
-            dataset = train_dataset
+            if callable(train_dataset):
+                print("Running dataset prep function on container...")
+                dataset = train_dataset()
+            else:
+                dataset = train_dataset
             if config.max_samples:
                 dataset = dataset.select(range(min(config.max_samples, len(dataset))))
             print(f"Using provided dataset with {len(dataset)} samples")
@@ -746,7 +754,11 @@ def train_local(config_dict: dict, reward_funcs, train_dataset=None, reward_weig
 
     # Load dataset
     if train_dataset is not None:
-        dataset = train_dataset
+        if callable(train_dataset):
+            print("Running dataset prep function...")
+            dataset = train_dataset()
+        else:
+            dataset = train_dataset
         # Ensure required columns exist
         if "prompt" not in dataset.column_names:
             raise ValueError(

@@ -70,6 +70,7 @@ Important: Always store calculations in variables and print the final result."""
 # Dataset preparation
 # ---------------------------------------------------------------------------
 
+
 def extract_hash_answer(text: str) -> str | None:
     """Extract the numeric answer after #### in GSM8K answers."""
     if "####" not in text:
@@ -85,13 +86,15 @@ def prepare_dataset(max_samples: int | None = None):
     - answer: expected numeric answer (string)
     """
     data = load_dataset("openai/gsm8k", "main", split="train")
-    data = data.map(lambda x: {
-        "prompt": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": x["question"]},
-        ],
-        "answer": extract_hash_answer(x["answer"]),
-    })
+    data = data.map(
+        lambda x: {
+            "prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": x["question"]},
+            ],
+            "answer": extract_hash_answer(x["answer"]),
+        }
+    )
     if max_samples:
         data = data.select(range(min(max_samples, len(data))))
     return data
@@ -100,6 +103,7 @@ def prepare_dataset(max_samples: int | None = None):
 # ---------------------------------------------------------------------------
 # Helper: extract code from <code> tags
 # ---------------------------------------------------------------------------
+
 
 def extract_xml_code(text: str) -> str | None:
     """Extract code from between <code> tags."""
@@ -112,6 +116,7 @@ def extract_xml_code(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Custom RewardEnvironment — GSM8K code execution via mortal sandboxes
 # ---------------------------------------------------------------------------
+
 
 class GSM8KCodeExecutionReward(RewardEnvironment):
     """Executes generated code in Modal Functions and checks against expected answer.
@@ -149,7 +154,9 @@ class GSM8KCodeExecutionReward(RewardEnvironment):
         if not code:
             return 0.0
 
-        base = 0.2 if any(kw in code for kw in ["def", "for", "if", "print", "="]) else 0.0
+        base = (
+            0.2 if any(kw in code for kw in ["def", "for", "if", "print", "="]) else 0.0
+        )
 
         # Ensure code prints result
         exec_code = code.strip()
@@ -169,14 +176,18 @@ class GSM8KCodeExecutionReward(RewardEnvironment):
             return base + 0.3 + 1.5  # 2.0 total
         return base + 0.3  # 0.5 total — executed but wrong answer
 
-    def score_batch(self, completions: list[str], prompts: list[str], **kwargs) -> list[float]:
+    def score_batch(
+        self, completions: list[str], prompts: list[str], **kwargs
+    ) -> list[float]:
         """Parallel sandbox execution for all completions."""
         answers = kwargs.get("answer", [""] * len(completions))
         codes = [self.extract_code(c) for c in completions]
 
-        print(f"[GSM8K score_batch] {len(completions)} completions, "
-              f"codes found: {sum(1 for c in codes if c is not None)}/{len(codes)}, "
-              f"answers: {answers[:2]}...")
+        print(
+            f"[GSM8K score_batch] {len(completions)} completions, "
+            f"codes found: {sum(1 for c in codes if c is not None)}/{len(codes)}, "
+            f"answers: {answers[:2]}..."
+        )
 
         # Build code strings for execution
         exec_codes = []
@@ -188,7 +199,11 @@ class GSM8KCodeExecutionReward(RewardEnvironment):
                 has_code.append(False)
                 base_rewards.append(0.0)
             else:
-                base = 0.2 if any(kw in code for kw in ["def", "for", "if", "print", "="]) else 0.0
+                base = (
+                    0.2
+                    if any(kw in code for kw in ["def", "for", "if", "print", "="])
+                    else 0.0
+                )
                 c = code.strip()
                 if "print(" not in c:
                     c += "\nprint(result)"
@@ -201,10 +216,14 @@ class GSM8KCodeExecutionReward(RewardEnvironment):
         exec_results = {}
         if non_empty:
             batch_codes = [c for _, c in non_empty]
-            print(f"[GSM8K score_batch] Executing {len(batch_codes)} codes via Modal Function...")
+            print(
+                f"[GSM8K score_batch] Executing {len(batch_codes)} codes via Modal Function..."
+            )
             print(f"[GSM8K score_batch] First code: {batch_codes[0][:200]}")
             batch_results = self.execute_batch_in_function(batch_codes)
-            print(f"[GSM8K score_batch] Function results: {[(r.success, r.stdout[:50] if r.stdout else '') for r in batch_results[:3]]}")
+            print(
+                f"[GSM8K score_batch] Function results: {[(r.success, r.stdout[:50] if r.stdout else '') for r in batch_results[:3]]}"
+            )
             for (idx, _), result in zip(non_empty, batch_results):
                 exec_results[idx] = result
         else:
@@ -239,6 +258,7 @@ class GSM8KCodeExecutionReward(RewardEnvironment):
 # TRL-compatible reward functions (format + quality checks)
 # ---------------------------------------------------------------------------
 
+
 def format_reward(completions, **kwargs) -> list[float]:
     """Check completions for XML structure, with partial credit.
 
@@ -252,9 +272,9 @@ def format_reward(completions, **kwargs) -> list[float]:
 
     # Debug: print first 2 completions per batch
     for i, r in enumerate(responses[:2]):
-        print(f"\n{'='*40} Completion {i} {'='*40}")
+        print(f"\n{'=' * 40} Completion {i} {'=' * 40}")
         print(r)
-        print(f"{'='*90}\n")
+        print(f"{'=' * 90}\n")
 
     rewards = []
     for r in responses:
@@ -306,13 +326,19 @@ def code_quality_reward(completions, **kwargs) -> list[float]:
 MODES = {
     "single_node": lambda: SingleNode(gpu="A100-80GB"),
     "single_node_vllm_colocate": lambda: SingleNode(
-        gpu="A100-80GB", use_vllm=True, vllm_mode="colocate",
+        gpu="A100-80GB",
+        use_vllm=True,
+        vllm_mode="colocate",
     ),
     "single_node_vllm_serve": lambda: SingleNode(
-        gpu=GPUConfig("A100-80GB", count=2), use_vllm=True, vllm_mode="serve",
+        gpu=GPUConfig("A100-80GB", count=2),
+        use_vllm=True,
+        vllm_mode="serve",
     ),
     "distributed": lambda: Distributed(
-        actor="A100", rollout="A10G", num_rollout_workers=1,
+        actor="A100",
+        rollout="A10G",
+        num_rollout_workers=1,
     ),
 }
 
@@ -321,42 +347,55 @@ MODES = {
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="GSM8K GRPO Training with MORTAL")
-    parser.add_argument("--mode", choices=list(MODES.keys()), default="single_node",
-                        help="Execution mode")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument(
+        "--mode",
+        choices=list(MODES.keys()),
+        default="single_node",
+        help="Execution mode",
+    )
+    parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--max_steps", type=int, default=100)
-    parser.add_argument("--max_samples", type=int, default=None,
-                        help="Limit dataset size (None = full 7.5k)")
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Limit dataset size (None = full 7.5k)",
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_generations", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
-    parser.add_argument("--detach", action="store_true",
-                        help="Fire and forget (training continues after terminal closes)")
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Fire and forget (training continues after terminal closes)",
+    )
     args = parser.parse_args()
-
-    # Prepare dataset
-    print(f"Loading GSM8K dataset (max_samples={args.max_samples})...")
-    dataset = prepare_dataset(max_samples=args.max_samples)
-    print(f"Dataset ready: {len(dataset)} samples")
 
     # Build mode
     mode = MODES[args.mode]()
     print(f"Mode: {args.mode} → {mode}")
 
+    # Dataset prep function — runs on Modal container, not locally
+    max_samples = args.max_samples
+    def dataset_fn():
+        return prepare_dataset(max_samples=max_samples)
+
     # Build reward functions:
-    # - GSM8KCodeExecutionReward: executes code in Modal Sandboxes, checks answer
+    # - GSM8KCodeExecutionReward: executes code in Modal Functions, checks answer
     # - format_reward: checks <reasoning>/<code> XML structure
     # - code_quality_reward: checks comments, print statements, etc.
     code_exec_env = GSM8KCodeExecutionReward()
 
     # Create trainer — same DX as TRL, just add mode=
+    # train_dataset=callable runs on the Modal container (no local data loading)
     trainer = MortalTrainer(
         model=args.model,
         mode=mode,
         reward_funcs=[format_reward, code_exec_env, code_quality_reward],
-        train_dataset=dataset,
+        train_dataset=dataset_fn,
         max_steps=args.max_steps,
         batch_size=args.batch_size,
         num_generations=args.num_generations,

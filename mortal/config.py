@@ -161,6 +161,44 @@ class SingleNode:
 
 
 @dataclass
+class AsyncConfig:
+    """Async training configuration for distributed mode.
+
+    Controls how rollout and training overlap:
+    - pipeline: overlap generation N+1 with training N (1-step stale)
+    - queue: full producer-consumer via modal.Queue (multi-step stale)
+    """
+
+    enabled: bool = False
+    mode: str = "pipeline"           # "pipeline" or "queue"
+    staleness_threshold: int = 1     # max steps of staleness allowed
+    sync_every: int = 1              # train steps between weight syncs
+    queue_size: int = 2              # max batches buffered (queue mode)
+    prefetch: int = 1                # batches to prefetch (pipeline mode)
+
+    def to_dict(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "staleness_threshold": self.staleness_threshold,
+            "sync_every": self.sync_every,
+            "queue_size": self.queue_size,
+            "prefetch": self.prefetch,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AsyncConfig":
+        return cls(
+            enabled=d.get("enabled", False),
+            mode=d.get("mode", "pipeline"),
+            staleness_threshold=d.get("staleness_threshold", 1),
+            sync_every=d.get("sync_every", 1),
+            queue_size=d.get("queue_size", 2),
+            prefetch=d.get("prefetch", 1),
+        )
+
+
+@dataclass
 class Distributed:
     """Distributed execution mode. Separate ActorWorker + RolloutWorker(s).
 
@@ -173,12 +211,15 @@ class Distributed:
     weight_sync_method: str = "reload"
     sync_weights_every: int = 1
     num_rollout_workers: int = 2
+    async_config: AsyncConfig = field(default_factory=AsyncConfig)
 
     def __post_init__(self):
         if isinstance(self.actor, str):
             self.actor = GPUConfig.from_string(self.actor)
         if isinstance(self.rollout, str):
             self.rollout = GPUConfig.from_string(self.rollout)
+        if isinstance(self.async_config, dict):
+            self.async_config = AsyncConfig.from_dict(self.async_config)
 
     def to_dict(self) -> dict:
         return {
@@ -188,18 +229,23 @@ class Distributed:
             "weight_sync_method": self.weight_sync_method,
             "sync_weights_every": self.sync_weights_every,
             "num_rollout_workers": self.num_rollout_workers,
+            "async_config": self.async_config.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Distributed":
         actor = GPUConfig.from_dict(d["actor"]) if isinstance(d.get("actor"), dict) else d.get("actor", "A100")
         rollout = GPUConfig.from_dict(d["rollout"]) if isinstance(d.get("rollout"), dict) else d.get("rollout", "A10G")
+        async_cfg = d.get("async_config", {})
+        if isinstance(async_cfg, dict):
+            async_cfg = AsyncConfig.from_dict(async_cfg)
         return cls(
             actor=actor,
             rollout=rollout,
             weight_sync_method=d.get("weight_sync_method", "reload"),
             sync_weights_every=d.get("sync_weights_every", 1),
             num_rollout_workers=d.get("num_rollout_workers", 2),
+            async_config=async_cfg,
         )
 
 
